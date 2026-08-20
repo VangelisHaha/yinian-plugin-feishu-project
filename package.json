@@ -1,0 +1,22 @@
+{
+  "name": "yinian-plugin-feishu-project",
+  "version": "0.1.0",
+  "description": "一念（Yinian）的飞书项目（Meegle）排期同步插件，走官方 HTTP MCP，零运行时依赖",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "doctor": "node scripts/doctor.mjs",
+    "test": "npm run build && node --test \"tests/**/*.test.mjs\"",
+    "verify": "npm run build && npm run doctor && node --test \"tests/**/*.test.mjs\"",
+    "pack:zip": "npm run build && node scripts/pack.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.3",
+    "typescript": "5.9.2"
+  }
+}

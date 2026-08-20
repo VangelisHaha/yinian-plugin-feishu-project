@@ -1,0 +1,49 @@
+{
+  "scope": "integration",
+  "fields": [
+    {
+      "key": "projectKey",
+      "type": "string",
+      "label": "空间",
+      "required": true,
+      "placeholder": "huasheng",
+      "help": "空间的 simple name，就是 Meegle 网址里紧跟域名的那一段"
+    },
+    {
+      "key": "windowDays",
+      "type": "integer",
+      "label": "拉取窗口",
+      "default": 21,
+      "min": 7,
+      "max": 90,
+      "unit": "seconds",
+      "help": "从上周一往后数多少天。默认 21 天（上周一到下周日），足够覆盖本周与下周排期"
+    },
+    {
+      "key": "workItemTypes",
+      "type": "multi-enum",
+      "label": "工作项类型",
+      "options": [
+        { "value": "_all", "label": "全部标准类型" },
+        { "value": "temporary", "label": "临时任务" }
+      ],
+      "default": ["_all"],
+      "help": "临时任务（线上问题工单这类）默认不带，勾上才会同步"
+    },
+    {
+      "key": "utcOffset",
+      "type": "string",
+      "label": "空间时区偏移",
+      "default": "+08:00",
+      "maxLength": 6,
+      "help": "飞书返回的排期时间不带时区，按这个偏移解释。填错会让整段排期偏移几小时"
+    },
+    {
+      "key": "listSchedule",
+      "type": "action",
+      "label": "预览本窗口排期",
+      "rpc": "feishuProject.previewSchedule",
+      "help": "先看看会同步进来什么，再决定要不要启用"
+    }
+  ]
+}
