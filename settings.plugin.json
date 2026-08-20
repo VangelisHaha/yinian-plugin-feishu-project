@@ -1,0 +1,39 @@
+{
+  "scope": "plugin",
+  "fields": [
+    {
+      "key": "howto",
+      "type": "note",
+      "label": "准备工作",
+      "text": "去[飞书项目的 MCP 配置页](https://project.feishu.cn/b/mcp)做两件事：**打开个人偏好里的 MCP 开关**，然后复制页面上的 Token（`m-` 开头）填到下面。开关没开的话 Token 有效也会被拒绝。"
+    },
+    {
+      "key": "token",
+      "type": "string",
+      "label": "MCP Token",
+      "format": "secret",
+      "required": true,
+      "placeholder": "m-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+      "help": "存进本机加密文件（0600），界面永不回显，日志自动脱敏"
+    },
+    {
+      "key": "host",
+      "type": "enum",
+      "label": "版本",
+      "required": true,
+      "default": "project.feishu.cn",
+      "options": [
+        { "value": "project.feishu.cn", "label": "飞书项目（中国版）" },
+        { "value": "meegle.com", "label": "Meegle（国际版）" }
+      ],
+      "help": "两个版本的账号体系是分开的，Token 不通用"
+    },
+    {
+      "key": "testConnection",
+      "type": "action",
+      "label": "测试连接",
+      "rpc": "feishuProject.testConnection",
+      "help": "会真的调一次飞书项目，把当前登录身份显示出来"
+    }
+  ]
+}
