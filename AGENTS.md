@@ -34,3 +34,10 @@
 2. `npm run pack:zip`。
 3. Git tag **必须与 manifest 的 `version` 完全一致**，GitHub Release 挂那一个 zip。
 4. 索引仓库 [yinian-plugins](https://github.com/VangelisHaha/yinian-plugins) 里加/留一条。
+
+## AI 工具扩展（0.13.0 契约）
+
+`src/handlers/tools.mts` 通过 SDK `toolHandlers` 注册，定义同时作为发现与执行的唯一来源。
+公共 SDK 从官方模板同步；参数 Schema 使用宿主支持的子集。读工具不得写入，写工具必须依赖
+宿主注入的稳定 operationId；声明 idempotent 必须真正处理超时后核对，不能只靠内存去重。
+绑定工具只返回标准外部数据，关联与本地数据库写入由宿主完成，不新增通用动作绕过确认。

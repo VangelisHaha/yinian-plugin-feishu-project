@@ -1,3 +1,4 @@
+import { handlers as agentTools } from "./handlers/tools.mjs";
 /**
  * 飞书项目插件入口。
  *
@@ -24,6 +25,7 @@ function readManifestVersion(): string {
 start({
   version: readManifestVersion(),
   handlers: {
+    ...agentTools,
     "sync.pull": sync.pull,
     "sync.push": sync.push,
     "config.validate": config.validate,

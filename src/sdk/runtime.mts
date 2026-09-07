@@ -109,6 +109,38 @@ export function setState(params: HostSetStateParams): void {
   writeFrame({ jsonrpc: "2.0", method: "host.setState", params });
 }
 
+// ─── 多端同步的实时上报（契约 §5.4.4）────────────────────────────────────────
+//
+// 只有 `contributes.replica` 且 `capabilities.watch = true` 的插件用得上这两个。
+// `replica.watch` 必须**立即返回**，之后在自己的循环里等变更，用下面两个通知上报。
+
+/**
+ * 上报「远端有新对象」。
+ *
+ * `keys` 可以省略，表示「有变化，宿主自己去 `list`」——插件不必精确报出变了哪些对象，
+ * 报不全比报错好，宿主的 `list` 才是权威。
+ */
+export function replicaChanged(params: {
+  profileId: string;
+  cursor?: string;
+  keys?: string[];
+}): void {
+  writeFrame({ jsonrpc: "2.0", method: "replica.changed", params });
+}
+
+/**
+ * 订阅存活心跳。**没有变更时也要发。**
+ *
+ * 宿主不对 `watch` 返回之后的静默期计时，改用心跳判活：连续 3 个心跳周期没收到就
+ * 认为订阅已死，`unwatch` + 重新 `watch`。不发心跳的后果是订阅被反复重建。
+ */
+export function replicaHeartbeat(params: {
+  profileId: string;
+  cursor?: string;
+}): void {
+  writeFrame({ jsonrpc: "2.0", method: "replica.heartbeat", params });
+}
+
 /**
  * 把 console.* 重定向到 stderr。
  *

@@ -91,3 +91,13 @@ JSON-RPC 2.0：initialize → mcp-session-id → notifications/initialized → t
 三个容易踩的点写在代码注释里：鉴权头必须是 `X-Mcp-Token`、必须走完握手拿会话、`Accept` 要同时含 JSON 与 SSE。
 
 契约见[插件架构文档](https://github.com/VangelisHaha/nikou-agenda/blob/main/docs/11-plugin-architecture.md)，排期段部分在 §5.1。
+
+## 一念 AI 工具（需要宿主 0.13.0）
+
+插件启用并配置有效后，一念 AI 面板自动发现 `contributes.agentTools`。可在 Agent 设置中单独
+关闭 AI 使用，不影响同步。查询直接执行，创建先显示目标及参数，由用户在面板确认一次。
+失败保留本地事项，重试复用原操作，不能通过设置动作或外部 CLI 绕过确认。
+
+工具实现见 `src/handlers/tools.mts`，公共 SDK 来自官方模板 `src/sdk/tools.mts`；自定义工具
+请参考 [模板中文教程](https://github.com/VangelisHaha/yinian-plugin-template#ai-工具自定义插件接入指南)。
+本插件的自动测试使用模拟响应，不创建真实第三方事项。

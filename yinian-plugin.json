@@ -2,11 +2,11 @@
   "manifestVersion": 1,
   "id": "yinian-feishu-project",
   "name": "飞书项目",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "vangelis",
   "description": "把飞书项目（Meegle）的排期同步进一念：工作项成任务，每个排期节点成一个排期块",
   "homepage": "https://github.com/VangelisHaha/yinian-plugin-feishu-project",
-  "minHostVersion": "0.5.4",
+  "minHostVersion": "0.13.0",
   "runtime": {
     "kind": "process",
     "node": ">=20",
@@ -15,26 +15,50 @@
     }
   },
   "permissions": {
-    "net": ["project.feishu.cn", "meegle.com"],
+    "net": [
+      "project.feishu.cn",
+      "meegle.com"
+    ],
     "spawn": [],
     "fs": [],
     "api": []
   },
   "contributes": {
     "sync": {
-      "resources": ["task"],
+      "resources": [
+        "task"
+      ],
       "capabilities": {
-        "actions": ["list", "complete", "reopen"],
-        "fields": ["title", "due_at", "schedule"]
+        "actions": [
+          "list",
+          "complete",
+          "reopen"
+        ],
+        "fields": [
+          "title",
+          "due_at",
+          "schedule"
+        ]
       }
     },
     "syncStrategy": {
-      "modes": ["interval", "manual"],
+      "modes": [
+        "interval",
+        "manual"
+      ],
       "defaultIntervalSeconds": 900,
       "minIntervalSeconds": 300
     },
     "hooks": [],
-    "settingsPanel": ["settings.plugin.json", "settings.integration.json"]
+    "settingsPanel": [
+      "settings.plugin.json",
+      "settings.integration.json"
+    ],
+    "agentTools": {
+      "scope": "integration"
+    }
   },
-  "authMode": ["token"]
+  "authMode": [
+    "token"
+  ]
 }

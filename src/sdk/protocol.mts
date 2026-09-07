@@ -40,11 +40,18 @@ export interface RpcNotification {
   params: unknown;
 }
 
-/** 插件可以主动发的三个通知。**不得主动发带 `id` 的请求帧。** */
+/**
+ * 插件可以主动发的通知。**不得主动发带 `id` 的请求帧。**
+ *
+ * 前三个是所有插件通用；后两个只有 `contributes.replica` 且 `capabilities.watch = true`
+ * 的插件会用到（契约 §5.4.4）。
+ */
 export type HostNotificationMethod =
   | "host.log"
   | "host.progress"
-  | "host.setState";
+  | "host.setState"
+  | "replica.changed"
+  | "replica.heartbeat";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -128,10 +135,39 @@ export const TIMEOUTS: Readonly<Record<string, number>> = Object.freeze({
   "plugin.init": 30_000,
   "config.validate": 30_000,
   "config.schema": 15_000,
+  "tools.list": 15_000,
+  "tools.call": 120_000,
   "sync.pull": 120_000,
   "sync.push": 120_000,
   "hook.dispatch": 30_000,
   "notify.send": 30_000,
+  /**
+   * 远小于其他调用，因为它**在 UI 路径上**——用户翻一页月视图就等着它。
+   *
+   * 所以别在这个调用里发网络请求：刷新放到自己的后台节奏里，`list` 只读本地缓存。
+   * 它失败也不重试、不计入断路器（契约 §4.5）：标记是装饰性显示，
+   * 重试只会让翻月卡住。
+   */
+  "dayMarks.list": 8_000,
+  /**
+   * 同 `dayMarks.list`：也在 UI 路径上，也不许在调用里发网络请求（契约 §8.4）。
+   *
+   * 差别只在数据归属——它拉的是用户在外部系统里的个人数据，所以默认关闭、
+   * 必须由用户显式启用，关着时宿主根本不会调它。
+   */
+  "calendarOverlay.list": 8_000,
+  /**
+   * 多端同步传输（契约 §5.4.5）。put/get 搬字节给得宽，list/delete 是元数据操作。
+   *
+   * **watch/unwatch 只有 10 秒**：它们只是开关订阅、不做 I/O 等待。返回之后的静默期
+   * 宿主**不计时**，改用 `replica.heartbeat` 判活——这是它与所有其他 RPC 的唯一区别。
+   */
+  "replica.put": 60_000,
+  "replica.get": 60_000,
+  "replica.list": 30_000,
+  "replica.delete": 30_000,
+  "replica.watch": 10_000,
+  "replica.unwatch": 10_000,
   "plugin.shutdown": 5_000,
   /** 自定义方法（含 action 与 optionsFrom）。 */
   custom: 15_000,
@@ -142,8 +178,15 @@ export const TIMEOUTS: Readonly<Record<string, number>> = Object.freeze({
  *
  * 形如 `feishu.testConnection`，且不得占用宿主保留的前缀。
  */
-export const CUSTOM_METHOD_PATTERN = /^[a-z][a-zA-Z0-9]*(\.[a-z][a-zA-Z0-9]*)+$/;
+export const CUSTOM_METHOD_PATTERN =
+  /^[a-z][a-zA-Z0-9]*(\.[a-z][a-zA-Z0-9]*)+$/;
 
+/**
+ * 宿主保留的方法前缀，与宿主 `plugin/protocol.rs` 的 `RESERVED_PREFIXES` 一一对应。
+ *
+ * 少一个的后果是：doctor 放行了一个自定义方法名，装进宿主却被判违规——报错发生在
+ * 用户那边而不是开发期。
+ */
 export const RESERVED_METHOD_PREFIXES = [
   "plugin.",
   "config.",
@@ -151,6 +194,10 @@ export const RESERVED_METHOD_PREFIXES = [
   "notify.",
   "hook.",
   "host.",
+  "tools.",
+  "dayMarks.",
+  "calendarOverlay.",
+  "replica.",
 ] as const;
 
 export function isValidCustomMethod(method: string): boolean {

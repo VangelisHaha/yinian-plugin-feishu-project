@@ -82,10 +82,12 @@ export interface ExternalItem {
   /**
    * 想让用户在任务详情「来源」区看到的额外字段。
    *
-   * 一念主模型只有所有待办系统都有的字段；飞书项目独有的东西（空间、工作项状态、
-   * 当前节点）走这里，宿主原样展示。
+   * 一念的主模型只有所有待办系统都有的字段。你系统里独有的东西（空间、工作项类型、
+   * 当前节点、负责人…）走这里：**你自己整理成「标签 + 值」，宿主原样展示**，
+   * 核心不认识任何具体外部系统。
    *
-   * **缺省与空数组语义不同**：不传表示「这次不带」，宿主保持上次的值；传 `[]` 表示清空。
+   * **缺省与空数组语义不同**：不传表示「这次不带展示字段」，宿主保持上次的值；
+   * 传 `[]` 表示「明确没有了」，宿主会清空。
    */
   details?: ExternalDetailField[];
 }
@@ -93,13 +95,25 @@ export interface ExternalItem {
 /**
  * 一条展示字段。
  *
- * 宿主硬限制（超出直接丢弃）：最多 20 条，`label` ≤ 32 字符，`value` ≤ 512 字符。
- * `kind: "link"` 的 value 必须是 http(s)，否则宿主降级成纯文本。
+ * 宿主的硬限制（超出直接丢弃，不报错）：最多 20 条，`label` ≤ 32 字符，
+ * `value` ≤ 512 字符，`label` 或 `value` 为空白的条目会被丢掉。
  */
 export interface ExternalDetailField {
+  /** 字段名，直接展示给用户。用人话，别用 API 字段名。 */
   label: string;
-  /** 已经格式化好的值：时间戳、枚举 id 请自己转成人能读的文本。 */
+  /**
+   * 已经格式化好的值。
+   *
+   * 时间戳、枚举 id、嵌套对象请**自己转成人能读的文本**——宿主不认识你的数据结构，
+   * 传 `1755000000000` 用户就只能看到 `1755000000000`。
+   */
   value: string;
+  /**
+   * 缺省 `text`。
+   *
+   * `link` 的 `value` 必须是 `http` / `https`，否则宿主会降级成纯文本展示。
+   * 刻意只有这两种：内容来自第三方仓库，能渲染 HTML / Markdown 就等于交出 XSS 面。
+   */
   kind?: "text" | "link";
 }
 
@@ -150,15 +164,129 @@ export interface PullRequest {
 
 export interface PullResult {
   items: ExternalItem[];
+  /**
+   * 外部日历容器（`resource: "event"` 用）。
+   *
+   * 不给也能用：宿主会建一个以 Integration 名命名的兜底日历，
+   * 没有 `calendarExternalId` 的事件全部落在那里。只有一个日历的源（新股、节假日）
+   * 不需要操心这一段。
+   */
+  calendars?: ExternalCalendar[];
+  /** 外部事件（`resource: "event"` 用）。 */
+  events?: ExternalEvent[];
+  /**
+   * `true` 表示本次 pull 的 `events` 就是这些日历的**完整集合**，
+   * 宿主会把没出现的事件标成远端删除并置 `canceled`。
+   *
+   * 解决的问题：外部日历常常没有删除通知（新股上市后就从页面上消失了），
+   * 逐条 diff 又要求插件自己记账。
+   *
+   * **三条约束**：只在最后一页生效（分页时以最后一轮为准）；
+   * 增量源（只拉最近改动）**不要开**，否则每轮都会把历史事件全判成删除；
+   * 与 `deletedExternalIds` 可以同时用，取并集。
+   */
+  eventsComplete?: boolean;
   cursor?: string;
   hasMore: boolean;
   /**
    * 外部已删除的 id。
    *
-   * 宿主**不会**删本地任务，只把关联标成 `remote_deleted` 等人处理——
+   * task：宿主**不会**删本地任务，只把关联标成 `remote_deleted` 等人处理——
    * 外部删除不该静默带走本地数据。
+   * event：关联标 `remote_deleted` 且事件置 `canceled`（不软删，
+   * 「这个会取消了」本身是用户要看到的信息）。
    */
   deletedExternalIds?: string[];
+}
+
+// ── Event 资源（pull-only，远端权威） ────────────────────────────────────
+//
+// 见一念仓库 docs/11-plugin-architecture.md §5.1.1。
+//
+// **宿主不会对 event 调 `sync.push`。** 外部日历一律落成只读日历，一念这侧改不了，
+// 也就没有冲突判定与待确认导入。理由：外部日历里的事情是外部已经发生的事实
+// （几号上市、会议改到几点），两边各改一半再 merge，结果和两边都不一致。
+
+/** 外部事件状态。**与 task 的四态不同**：Event 没有「完成」，只会取消。 */
+export type ExternalEventStatus = "active" | "canceled";
+
+export type ExternalBusyStatus = "busy" | "tentative" | "free";
+
+export type ExternalResponseStatus =
+  | "needs_action"
+  | "accepted"
+  | "declined"
+  | "tentative";
+
+/**
+ * 外部系统里的一个日历容器。
+ *
+ * 宿主按 `(integrationId, externalId)` upsert 成一念的日历行，用户可以在日历侧栏
+ * 按来源逐个隐藏——**隐藏选择不会被同步覆盖**，远端改名只改名字。
+ *
+ * 刻意只有两个字段：pull-only 下让插件声明「这个日历可写」是空头承诺，
+ * 宿主没有 event 的回写通道。外部日历恒为只读。
+ */
+export interface ExternalCalendar {
+  /** 外部日历主键，同一 Integration 内唯一。 */
+  externalId: string;
+  /** 显示名，≤ 64 字符，超出截断。空白会被跳过（侧栏上是一行空白，认不出）。 */
+  name: string;
+}
+
+/**
+ * 外部日历里的一个事件。
+ *
+ * 时间形态**二选一**，混用的条目宿主会跳过并计入 `invalid`（其余条目照常落库）：
+ *
+ * - 定时：`allDay` 不传或 false，必须给 `startAt` / `endAt`
+ * - 全天：`allDay: true`，必须给 `startDate` / `endDate`，**右开区间**
+ */
+export interface ExternalEvent {
+  /**
+   * 外部主键，同一 Integration 内唯一且稳定。
+   *
+   * **一条外部记录可以产多个事件**：一只新股有认购截止、暗盘、上市三个时点，
+   * 这时自己拼稳定后缀（`02261:listing`）。不要用序号——顺序一变就全错位。
+   */
+  externalId: string;
+  /** 归属的 `ExternalCalendar.externalId`。不给就落在兜底日历。 */
+  calendarExternalId?: string;
+  /** 给了它，事件详情就有「在你的插件里打开」按钮。 */
+  externalUrl?: string;
+  title: string;
+  notes?: string;
+  /** 缺省 `active`。 */
+  status?: ExternalEventStatus;
+  /** 缺省 false。 */
+  allDay?: boolean;
+  /** RFC3339，非全天必填。 */
+  startAt?: string;
+  /** RFC3339，非全天必填，必须晚于 `startAt`。 */
+  endAt?: string;
+  /** `YYYY-MM-DD`，全天必填。 */
+  startDate?: string;
+  /** `YYYY-MM-DD`，全天必填，**右开**：只占 8/20 要写 `2026-08-21`。 */
+  endDate?: string;
+  location?: string;
+  /**
+   * 缺省 `busy`。
+   *
+   * 信息类事件（新股上市、节假日、财报日）**建议给 `free`**，
+   * 否则会把用户一整天标成忙，忙闲视图就没意义了。
+   */
+  busyStatus?: ExternalBusyStatus;
+  /** 缺省 `accepted`。 */
+  responseStatus?: ExternalResponseStatus;
+  /** 缺省 **false**，与本地新建 Event 相反——同步来的事件不是你组织的。 */
+  isOrganizer?: boolean;
+  recurrenceRule?: string;
+  /** RFC3339。有它宿主就能跳过没变化的事件，省一次写库。 */
+  remoteUpdatedAt?: string;
+  /** 外部原始 JSON 全量，宿主原样存下来。 */
+  remoteData?: unknown;
+  /** 事件详情「来源」区的展示字段，与 task 同一结构、同一限制。 */
+  details?: ExternalDetailField[];
 }
 
 export interface PushRequest {
@@ -252,6 +380,42 @@ export interface NotificationAction {
   label: string;
 }
 
+/** 明细里的一行。`value` 是宿主**已经格式化好的**字符串，直接印。 */
+export interface NotificationField {
+  label: string;
+  value: string;
+}
+
+/**
+ * 给富消息渠道的明细（契约 §8.2）。
+ *
+ * `title` / `body` 是为系统通知栏那两行字准备的；飞书卡片、企微图文有更大的版面，
+ * 只印这两行等于浪费掉。
+ *
+ * **`fields` 的值不要再解析。** 时区转换、全天右开区间、跨天段、只到日期的截止，
+ * 宿主已经按本机时区处理好了；渠道自己算一遍必然会写歪，而写歪的表现是用户收到
+ * 一个错的时间且毫无提示。要做视觉强调用 `priority` 与 `overdue`。
+ *
+ * `kind: "custom"`（比如设置页的测试通知）没有宿主实体，**不会带 detail**。
+ */
+export interface NotificationDetail {
+  /** 事项本体标题，不含段名。`Notification.title` 是 `subject · label` 的合成结果。 */
+  subject: string;
+  /** 排期块的段名（「中台开发」），其余类型没有。 */
+  label?: string;
+  /** 只有 Task 与排期块有。事件是 `undefined`，不是 `"none"`。 */
+  priority?: "none" | "low" | "medium" | "high";
+  /** 锚点是否已经过去。 */
+  overdue?: boolean;
+  /**
+   * `yinian://open/{task|event}/{id}`，唤起一念并打开该事项。
+   *
+   * **由宿主生成，不要自己拼 scheme。** 排期块给的是所属任务的链接（§8.2.1）。
+   */
+  deepLink?: string;
+  fields?: NotificationField[];
+}
+
 export interface Notification {
   id: string;
   kind: NotificationKind;
@@ -260,6 +424,8 @@ export interface Notification {
   entity?: EntityRef;
   /** 只有 manifest 里声明了 `supportsActions` 的渠道才会收到。 */
   actions?: NotificationAction[];
+  /** 富消息渠道用的明细。系统通知栏那种渠道可以完全忽略它。 */
+  detail?: NotificationDetail;
 }
 
 export interface NotifyRequest {
@@ -270,6 +436,266 @@ export interface NotifyRequest {
 export interface NotifyResult {
   delivered: boolean;
   detail?: string;
+}
+
+// ── 日期标记 ─────────────────────────────────────────────────────────────
+//
+// 见一念仓库 docs/11-plugin-architecture.md §8.3。
+//
+// 日期标记是挂在**某一天**上的公开日历知识：农历日序、二十四节气、传统与公历节日、
+// 法定假日与调休上班。它不属于任何用户，**不进宿主数据库、永不参与同步**——
+// 给定日期就能算出来或查出来。
+
+/**
+ * 标记类型。**这就是界面上的开关粒度**，用户可以只要休 / 班而不要圣诞节。
+ *
+ * `festival` 与 `holiday` 刻意分开：春节是**一天**、春节假期是**七天**，
+ * 混成一类就没法只显示放假安排而不显示节日名。
+ */
+export type DayMarkKind = "lunar" | "solar_term" | "festival" | "holiday";
+
+/** 这天是休还是班。**`kind: "holiday"` 必须给。** */
+export type DayRest = "off" | "work";
+
+/** 一条日期标记。 */
+export interface DayMark {
+  /**
+   * 本地日期键，**严格** `YYYY-MM-DD`。
+   *
+   * `2026-8-1` 会被宿主拒（`PLUGIN_CONTRACT_VIOLATION`）：它当 Map key 时和
+   * `2026-08-01` 对不上，界面表现为「有几天没有农历」而且不报错。
+   */
+  date: string;
+  kind: DayMarkKind;
+  /**
+   * 紧凑标签，月视图格子里显示的就是它，**2–3 字**。
+   *
+   * 更长的会被省略号截掉——那一格宽度只有 100 出头像素，还要和日期数字、
+   * 休班角标、负载数字挤在同一行。
+   */
+  label: string;
+  /** 长文案，给 Agenda 与日期详情。与 `label` 相同时不必给。 */
+  detail?: string;
+  /**
+   * `off` 放假 / `work` 调休上班。
+   *
+   * **周末也可能是上班日**，这正是它必须被显示出来的原因。
+   */
+  rest?: DayRest;
+}
+
+/**
+ * provider 声明。与 manifest 的 `contributes.dayMarks.providers` 同形。
+ *
+ * 在 `dayMarks.list` 的结果里回传它，可以**动态更新覆盖范围**——比如联网拉到了
+ * 次年的放假安排，`coversUntil` 就该往后延。省略时宿主沿用 manifest 的声明。
+ */
+export interface DayMarkProviderSpec {
+  id: string;
+  /** 展示名。**宿主不翻译它**——「日本の祝日」该按原样显示。 */
+  name: string;
+  kinds: DayMarkKind[];
+  /** ISO 3166-1 alpha-2。跨地区的（农历）留空。 */
+  region?: string;
+  /**
+   * 数据覆盖到哪天（`YYYY-MM-DD`）。
+   *
+   * **留空表示「算得出来」**（农历、节气按天文算法算，任意年份都有）；
+   * 有值表示「数据只到那天」（法定假日是按年公布的），超出的日子宿主会提示
+   * 「安排尚未公布」。
+   *
+   * 把「查不到」当成「那天不放假」是这个扩展点最容易犯的错：用户会照着一张错的
+   * 日历排期，而界面上没有任何异常。
+   */
+  coversUntil?: string;
+}
+
+export interface DayMarksListRequest {
+  /** 要问哪个 provider，对应 manifest 里声明的 `id`。 */
+  providerId: string;
+  /** 闭区间起点，`YYYY-MM-DD`。 */
+  from: string;
+  /** 闭区间终点，`YYYY-MM-DD`。**闭区间**：月视图要的就是那 42 个格子。 */
+  to: string;
+}
+
+export interface DayMarksListResult {
+  /**
+   * 区间内的全部标记。**允许为空**——「这段时间没有节日」不是错误。
+   *
+   * 同一天可以给多条（清明既是节气又是节日又是假期），宿主负责排序与择一显示，
+   * 你不需要操心优先级。
+   */
+  marks: DayMark[];
+  /** 可选，用来动态更新覆盖范围。 */
+  providers?: DayMarkProviderSpec[];
+}
+
+// ── 日历叠加层 ───────────────────────────────────────────────────────────
+//
+// 见一念仓库 docs/11-plugin-architecture.md §8.4。
+//
+// 把**外部系统里属于这个用户的信息**贴到日历上：某一天格子右上角的一个角标
+// （考勤的「班」「加」「假」）、视图右上角的一条汇总、以及日历侧栏底部那张
+// 「负载」卡里的几行统计。
+//
+// ## 与 dayMarks 的分野：公开知识 vs 个人数据
+//
+// 两者的数据形状很像（都是「挂在某一天上的一条短标签」），但**不是一件事**：
+// 日期标记谁算都一样（农历、节气、法定假），不需要账号，**装上即生效**；
+// 叠加层属于这个用户（我的打卡、我的请假），要外部凭据，**默认关闭、必须由用户
+// 在日历侧栏逐个显式打开，关着的时候宿主根本不会调 `calendarOverlay.list`**。
+//
+// 所以「用户第一次调到你」这件事本身就是授权信号——在那之前不要去拉他的数据。
+//
+// ## 核心不认识任何具体指标
+//
+// 「出勤」「加班」这些词一个都不在宿主代码里。宿主收到的是 `(标签, 值)` 对，
+// 照着排版画出来。文案与格式化（含单位、小数位）100% 归你，所以宿主会把当前
+// 界面语言下发给你（[`CalendarOverlayListRequest.locale`]）——它不认识「出勤」，
+// 也就无从翻译它。
+//
+// 反过来**颜色与字体一律归宿主**：`tone` 是语义档位而不是色值。
+
+/** 会往哪儿贴。manifest 的 `contributes.calendarOverlay.providers[].surfaces`。 */
+export type OverlaySurface = "dayBadge" | "summary" | "sidebarStat";
+
+/**
+ * 语义档位，**不是颜色**。
+ *
+ * 一念的视觉体系只有单一强调色，且强调色有四种既定语义（今日 / 选中 / 高优先级 /
+ * 逾期）。让插件带色相进来，结果一定是两个插件的颜色互相打架、深色主题下对比度
+ * 不够，而适配主题这件事没法指望插件做。
+ *
+ * - `neutral`：默认，一条普通信息
+ * - `strong`：这一项值得被看见（今天加了班）
+ * - `mute`：弱化——没有数据、不适用、已过去、**值是零**
+ * - `alert`：**需要处理**（工时对不上、缺卡）
+ *
+ * 两条硬规则：`alert` **不能用在角标上**（角标就在格子里，用强调色会和「今天」
+ * 「高优先级」抢注意力，宿主会降级成 `strong`）；`alert` **必须给 `detail`**，
+ * 只把数字标红而不说为什么，用户看到了也不知道该做什么（宿主同样会降级）。
+ */
+export type OverlayTone = "neutral" | "strong" | "mute" | "alert";
+
+/**
+ * 侧栏统计行的行首标记。**封闭的一小组形状，不是图标位。**
+ *
+ * 不收 SVG、不收 emoji、不收字符：一念的形状是语义载体而不是装饰（虚线块专指
+ * 排期块、圆勾圈专指任务、镂空方块专指同步来源）。塞一个虚线方块进侧栏，用户会去
+ * 日历上找它对应哪段排期，而根本没有。
+ *
+ * - `none`（默认）：只占位、不画。指标在日历上没有对应的东西时就该用它
+ * - `bar`：中性竖条，读作「一个量」（工时、天数）
+ * - `dot`：中性实心点，读作「一类事」（请假、缺卡）
+ *
+ * **只在 `sidebarStat` 上生效**——右上角那条汇总没有标记列。
+ */
+export type OverlayMark = "none" | "bar" | "dot";
+
+/** 贴在某一天格子右上角的一个角标。 */
+export interface DayBadge {
+  /**
+   * 本地日期键，**严格** `YYYY-MM-DD`。
+   *
+   * `2026-9-5` 会被宿主丢弃（当 Map key 时和 `2026-09-05` 对不上），
+   * 而现象是「那天没有角标」且不报错。
+   */
+  date: string;
+  /**
+   * 角标文字，**1–2 字**。
+   *
+   * 那一行还有日号、农历标签、休 / 班角标，空间只有那么大；超过 4 字符会被截断。
+   */
+  label: string;
+  /** 缺省 `neutral`。`alert` 在角标上会被降级为 `strong`。 */
+  tone?: OverlayTone;
+  /**
+   * 悬浮时的完整说明。
+   *
+   * 角标只有一两个字，这里是它的**唯一解释来源**——「加」到底是加班申请还是实际
+   * 加了几小时，不悬浮就看不出来。
+   */
+  detail?: string;
+}
+
+/**
+ * 汇总条里的一格，或侧栏那张卡里的一行。
+ *
+ * 两处**共用同一形状**，由你决定每个指标放哪：
+ *
+ * - 右上角那条是**横排**、始终在视野里、但很窄——适合一两个最该被一眼看到的
+ *   （比如「排期和出勤对不上」）。
+ * - 侧栏那张卡是**竖排**、有独立的标签列与数字列、空间宽松——适合一组同类指标
+ *   铺开（出勤 / 排期 / 加班 / 请假）。
+ *
+ * **同一个指标不要两处都给**：那是同一句话说两遍，而两处的数字万一因为取数时机
+ * 不同而不一致，用户只会觉得其中一个是错的。
+ */
+export interface OverlaySummaryItem {
+  /** 同一次返回里唯一，宿主用它做渲染 key。**不显示给用户。** */
+  key: string;
+  /** 指标名，**2–3 字**（「出勤」「加班」）。宿主不翻译，所以按 `locale` 自己给。 */
+  label: string;
+  /**
+   * 已格式化好的**字符串**，宿主原样显示。
+   *
+   * 不是数字：宿主不知道 `16.5` 该显示成 `16.5d`、`16.5 天` 还是 `16h30m`。
+   * 代价是宿主没法对它做算术——所以「这一项是零」要用 `tone: "mute"` 说，
+   * `"0d"` / `"—"` / `"暂无"` 宿主都只当普通文本。
+   */
+  value: string;
+  /** 缺省 `neutral`。用 `alert` 时**必须给 `detail`**，否则宿主降级为 `strong`。 */
+  tone?: OverlayTone;
+  /** 行首标记，缺省 `none`。**只在 `sidebarStat` 上生效。** */
+  mark?: OverlayMark;
+  /** 悬浮说明。 */
+  detail?: string;
+}
+
+export interface CalendarOverlayListRequest {
+  /** 要问哪个 provider，对应 manifest 里声明的 `id`（不带插件前缀）。 */
+  providerId: string;
+  /**
+   * 角标区间起点，`YYYY-MM-DD` 闭区间。
+   *
+   * 这是当前视图看得见的**全部格子**——月视图是 42 天，含上个月末尾与下个月开头
+   * 那几天。
+   */
+  from: string;
+  /** 角标区间终点，闭区间。 */
+  to: string;
+  /**
+   * 汇总口径起点，`YYYY-MM-DD` 闭区间。**与 `from` 通常不相等。**
+   *
+   * 月视图下它是当月 1 号，而 `from` 是格子里的第一天（可能是上月 28 号）。
+   * 拿 42 天的范围去算「本月出勤」会多算六七天，**而界面上完全看不出错**——
+   * 这是这个扩展点最容易做错的地方，所以两个区间都是必填。
+   */
+  summaryFrom: string;
+  /** 汇总口径终点，闭区间。 */
+  summaryTo: string;
+  /**
+   * 当前界面语言（BCP 47，如 `zh-CN` / `en`）。
+   *
+   * 这个扩展点的文案 100% 由你给，宿主不认识「出勤」这个词、也就无从翻译它，
+   * 所以你是唯一能做本地化的人。认不出这个值时**按自己的默认语言输出，不要报错**。
+   */
+  locale: string;
+}
+
+export interface CalendarOverlayListResult {
+  /**
+   * 区间内的角标。**允许为空**——「这段时间没有考勤记录」不是错误。
+   *
+   * 同一天给多条时宿主只取第一条（你自己该挑好，宿主没有依据猜哪条更重要）；
+   * 多个插件各给一条时那一格最多画 2 个。
+   */
+  badges?: DayBadge[];
+  /** 视图右上角那条横排汇总，最多 6 项，超出丢弃。 */
+  summary?: OverlaySummaryItem[];
+  /** 侧栏「负载」卡里的竖排统计行，最多 4 项（宿主自己已经占了 3 行）。 */
+  sidebarStats?: OverlaySummaryItem[];
 }
 
 // ── 设置面板 ─────────────────────────────────────────────────────────────
@@ -360,4 +786,127 @@ export interface ActionResult {
 /** `optionsFrom: "rpc:*"` 的返回值。 */
 export interface OptionsResult {
   options: SettingsFieldOption[];
+}
+
+// ─── 多端同步传输（replica，契约 §5.4）──────────────────────────────────────
+//
+// **replica 与 sync 是两个不同的扩展点，不要混。** sync 接的是外部系统（飞书、
+// Apple 日历），插件要理解对方的模型、产出 `ExternalItem`；replica 接的是**同一份
+// 数据的另一个副本**，插件**只搬运加密字节**，一个业务判断都不做。
+//
+// 两者语义在关键处正好相反：sync 遇到远端删除要保留本地，replica 必须真删。所以
+// manifest 里互斥，一个插件只能选一边。
+//
+// 五条硬约束（契约 §5.4.2，违反了宿主会判错或数据对不上）：
+//
+// 1. **`bytes` 是 base64。** 行分隔 JSON 放不了裸二进制。`maxObjectBytes` 说的是
+//    **解码后**的大小。
+// 2. **不得解释 `bytes`，也解释不了**——它是 XChaCha20-Poly1305 密文。日志里别打它。
+// 3. **`key` 由宿主生成**，不含业务语义。插件不得改写、加前缀或重排目录，否则换设备
+//    后对不上。要把数据放进自己的命名空间，用配置里的 database / 路径，别动 key。
+// 4. **`missing: true` 不是错误。** 对象被别的设备压实掉了是正常情况，返回 RPC 错误
+//    会白白触发退避与断路器。
+// 5. **`put` 必须幂等。** 同一个 key 重复写入同样的内容不算失败——网络重试会真的
+//    发生，而 journal 分片内容是不变的。
+
+/** `replica.put` 的一个待上传对象。 */
+export interface ReplicaPutObject {
+  key: string;
+  /** base64 编码的密文。 */
+  bytes: string;
+}
+
+export interface ReplicaPutParams {
+  profileId: string;
+  traceId?: string;
+  objects: ReplicaPutObject[];
+  config?: Record<string, unknown>;
+}
+
+export interface ReplicaPutResult {
+  /** 成功写入的 key。 */
+  written: string[];
+}
+
+export interface ReplicaGetParams {
+  profileId: string;
+  traceId?: string;
+  keys: string[];
+  config?: Record<string, unknown>;
+}
+
+/** 下载结果的一项。`missing: true` 时 `bytes` 省略，**这不是错误**。 */
+export interface ReplicaFetchedObject {
+  key: string;
+  bytes?: string;
+  missing?: boolean;
+}
+
+export interface ReplicaGetResult {
+  objects: ReplicaFetchedObject[];
+}
+
+export interface ReplicaListParams {
+  profileId: string;
+  traceId?: string;
+  prefix: string;
+  /** 上次返回的游标，增量列举。首次为空。 */
+  since?: string;
+  limit: number;
+  config?: Record<string, unknown>;
+}
+
+export interface ReplicaObjectMeta {
+  key: string;
+  /**
+   * 解码后字节数，**可省**。
+   *
+   * 宿主一处都不消费它（将来压实统计体积时才会用），而**绝不允许为了填上它去下载对象
+   * 内容**——CouchDB 插件早期在 `_all_docs` 上带了 `include_docs=true` 只为算这个数，
+   * 于是宿主每轮列举都把远端所有分片的密文整份下载一遍：功能完全正常，只是流量与历史
+   * 长度成正比（契约 §5.4.2）。拿不到就省略。
+   */
+  size?: number;
+}
+
+export interface ReplicaListResult {
+  objects: ReplicaObjectMeta[];
+  /** 下次 `list` 传回的游标。 */
+  cursor?: string;
+  hasMore?: boolean;
+}
+
+export interface ReplicaDeleteParams {
+  profileId: string;
+  traceId?: string;
+  keys: string[];
+  config?: Record<string, unknown>;
+}
+
+export interface ReplicaDeleteResult {
+  deleted: string[];
+}
+
+export interface ReplicaWatchParams {
+  profileId: string;
+  traceId?: string;
+  since?: string;
+  config?: Record<string, unknown>;
+}
+
+/**
+ * `replica.watch` 的应答。**必须立即返回**，不要在里面等第一条变更。
+ *
+ * 宿主是「串行请求-响应 + 超时杀进程」（契约 §4.5），挂在 watch 里等 60 秒的
+ * longpoll 会被当成超时杀掉然后无限重启。返回之后在自己的循环里等变更，用
+ * `replica.changed` 通知上报，并每 `heartbeatSeconds` 至少发一次 `replica.heartbeat`
+ * （没有变更时也要发）——宿主按 3 个心跳周期判活。
+ */
+export interface ReplicaWatchResult {
+  watching: boolean;
+  heartbeatSeconds?: number;
+}
+
+export interface ReplicaUnwatchResult {
+  watching: false;
 }

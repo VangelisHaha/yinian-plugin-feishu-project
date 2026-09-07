@@ -13,7 +13,16 @@
  * 退出码 0 全过，1 有错误。警告不影响退出码。
  */
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  mkdtempSync,
+  rmSync,
+} from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { validateToolSchema } from "../dist/sdk/tools.mjs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -32,7 +41,8 @@ const ROOT = resolveRoot();
 
 /** 与一念契约 §3.1 一致。 */
 const ID_PATTERN = /^[a-z0-9][a-z0-9-]{1,62}$/;
-const SEMVER_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+const SEMVER_PATTERN =
+  /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 const FIELD_KEY_PATTERN = /^[a-zA-Z][a-zA-Z0-9_]*$/;
 const CUSTOM_METHOD_PATTERN = /^[a-z][a-zA-Z0-9]*(\.[a-z][a-zA-Z0-9]*)+$/;
 const RESERVED_PREFIXES = [
@@ -42,6 +52,7 @@ const RESERVED_PREFIXES = [
   "notify.",
   "hook.",
   "host.",
+  "tools.",
 ];
 
 const FIELD_TYPES = new Set([
@@ -73,6 +84,8 @@ const HOOK_TOPICS = new Set([
   "schedule_block.deleted",
 ]);
 
+const SYNC_RESOURCES = new Set(["task", "event"]);
+
 const SYNC_ACTIONS = new Set([
   "list",
   "get",
@@ -96,6 +109,12 @@ const SYNC_FIELDS = new Set([
 ]);
 
 const SYNC_MODES = new Set(["interval", "manual", "eventDriven"]);
+
+/** 日期标记类型，契约 §8.3。四个之外的取值宿主直接拒绝安装。 */
+const DAY_MARK_KINDS = new Set(["lunar", "solar_term", "festival", "holiday"]);
+
+/** 日历叠加层贴在哪，契约 §8.4。 */
+const OVERLAY_SURFACES = new Set(["dayBadge", "summary", "sidebarStat"]);
 
 /** 宿主强制的间隔下限。 */
 const MIN_INTERVAL_FLOOR = 60;
@@ -129,7 +148,10 @@ function checkManifest() {
 
   const where = "yinian-plugin.json";
   if (manifest.manifestVersion !== 1) {
-    fail(where, `manifestVersion 目前只支持 1，实际是 ${manifest.manifestVersion}`);
+    fail(
+      where,
+      `manifestVersion 目前只支持 1，实际是 ${manifest.manifestVersion}`,
+    );
   }
   for (const key of ["id", "name", "version", "author", "minHostVersion"]) {
     if (typeof manifest[key] !== "string" || !manifest[key]) {
@@ -175,7 +197,9 @@ function checkRuntime(manifest, where) {
     fail(where, "缺少 runtime.entry");
     return;
   }
-  const target = entry[process.platform === "darwin" ? "macos" : process.platform] ?? entry.default;
+  const target =
+    entry[process.platform === "darwin" ? "macos" : process.platform] ??
+    entry.default;
   if (typeof target !== "string" || !target) {
     fail(where, "runtime.entry 需要当前平台的键或 default");
     return;
@@ -185,10 +209,7 @@ function checkRuntime(manifest, where) {
     return;
   }
   if (!existsSync(join(ROOT, target))) {
-    fail(
-      where,
-      `runtime.entry 指向的 ${target} 不存在——先跑 npm run build`,
-    );
+    fail(where, `runtime.entry 指向的 ${target} 不存在——先跑 npm run build`);
   }
 }
 
@@ -211,13 +232,55 @@ function checkPermissions(manifest, where) {
 function checkContributes(manifest, where) {
   const contributes = manifest.contributes ?? {};
 
+  // 契约 §3.4 的硬约束：什么都不贡献的插件永远不会被调用，装进去也是死的。
+  // `syncStrategy` 与 `settingsPanel` 不算——它们是修饰别的扩展点的，自己不是入口
+  const entryPoints = [
+    "sync",
+    "replica",
+    "notificationChannel",
+    "dayMarks",
+    "calendarOverlay",
+    "agentTools",
+    "hooks",
+  ];
+  const contributed = entryPoints.filter((key) => {
+    const value = contributes[key];
+    if (Array.isArray(value)) return value.length > 0;
+    return Boolean(value);
+  });
+  if (contributed.length === 0) {
+    fail(
+      where,
+      `contributes 至少要有一个扩展点（${entryPoints.join(" / ")}），否则插件永远不会被调用`,
+    );
+  }
+
+  if (
+    contributes.agentTools &&
+    (!["plugin", "integration"].includes(contributes.agentTools.scope) ||
+      Object.keys(contributes.agentTools).some((k) => k !== "scope"))
+  )
+    fail(where, "agentTools 必须声明 scope: plugin 或 integration");
   if (contributes.sync) {
     const sync = contributes.sync;
-    if (!Array.isArray(sync.resources) || sync.resources.length === 0) {
+    const resources = Array.isArray(sync.resources) ? sync.resources : [];
+    if (resources.length === 0) {
       fail(where, "contributes.sync 需要非空的 resources");
     }
+    for (const resource of resources) {
+      if (!SYNC_RESOURCES.has(resource)) {
+        fail(where, `未知的 sync resource「${resource}」`);
+      }
+    }
+    // 纯 event 插件不会收到 sync.push，也不吃 task 字段门控（一念 docs/11 §5.1.1）
+    const eventOnly =
+      resources.length > 0 && resources.every((item) => item === "event");
+
     const capabilities = sync.capabilities ?? {};
-    if (!Array.isArray(capabilities.actions) || capabilities.actions.length === 0) {
+    if (
+      !Array.isArray(capabilities.actions) ||
+      capabilities.actions.length === 0
+    ) {
       fail(where, "contributes.sync.capabilities.actions 不能为空");
     } else {
       for (const action of capabilities.actions) {
@@ -228,11 +291,28 @@ function checkContributes(manifest, where) {
       if (!capabilities.actions.includes("list")) {
         warn(where, "capabilities.actions 没有 list，宿主无法拉取，只能靠回写");
       }
+      if (eventOnly) {
+        const extra = capabilities.actions.filter(
+          (action) => action !== "list",
+        );
+        if (extra.length > 0) {
+          warn(
+            where,
+            `event 是 pull-only，「${extra.join("、")}」永远不会被调用，写 ["list"] 就够`,
+          );
+        }
+      }
     }
     for (const field of capabilities.fields ?? []) {
       if (!SYNC_FIELDS.has(field)) {
         fail(where, `未知的 sync field「${field}」`);
       }
+    }
+    if (eventOnly && (capabilities.fields ?? []).length > 0) {
+      warn(
+        where,
+        "capabilities.fields 是 task 字段的门控，纯 event 插件留空即可",
+      );
     }
     if (!contributes.syncStrategy) {
       fail(where, "声明了 sync 就必须声明 syncStrategy");
@@ -265,6 +345,57 @@ function checkContributes(manifest, where) {
     }
   }
 
+  // 多端同步传输（契约 §5.4）。**与 sync 互斥**：sync 接外部系统、replica 搬同步
+  // 字节，两者在「远端删除了怎么办」上语义正好相反（sync 保留本地、replica 必须真删），
+  // 混在一个插件里会让用户分不清它在同步什么，设置面板语义也完全不同。
+  if (contributes.replica) {
+    const replica = contributes.replica;
+    if (contributes.sync) {
+      fail(
+        where,
+        "contributes.sync 与 contributes.replica 不能同时声明：前者接外部系统、后者搬同步字节，语义相反",
+      );
+    }
+    if (contributes.syncStrategy) {
+      warn(
+        where,
+        "replica 不需要 syncStrategy：多端同步的调度由一念核心掌握，与 interval / manual 无关",
+      );
+    }
+    for (const key of ["id", "name"]) {
+      if (typeof replica[key] !== "string" || !replica[key].trim()) {
+        fail(where, `contributes.replica 缺少 ${key}`);
+      }
+    }
+    const capabilities = replica.capabilities ?? {};
+    for (const key of ["watch", "delete"]) {
+      if (key in capabilities && typeof capabilities[key] !== "boolean") {
+        fail(where, `contributes.replica.capabilities.${key} 必须是 boolean`);
+      }
+    }
+    if (capabilities.delete === false || capabilities.delete === undefined) {
+      warn(
+        where,
+        "capabilities.delete 不为 true 时压实不可用，远端日志只增不减——界面上会如实提示用户",
+      );
+    }
+    if ("maxObjectBytes" in capabilities) {
+      const max = capabilities.maxObjectBytes;
+      if (typeof max !== "number" || !Number.isFinite(max) || max <= 0) {
+        fail(
+          where,
+          "contributes.replica.capabilities.maxObjectBytes 必须是正数（解码后字节）",
+        );
+      }
+    }
+    if (capabilities.watch === true) {
+      warn(
+        where,
+        "声明了 capabilities.watch 就必须每 heartbeatSeconds 至少发一次 replica.heartbeat（没变更时也要发）：宿主按 3 个周期判活，不发会被反复 unwatch + watch 重建，而界面上会显示「已退回轮询」",
+      );
+    }
+  }
+
   for (const topic of contributes.hooks ?? []) {
     if (!HOOK_TOPICS.has(topic)) {
       fail(where, `未知的 hook topic「${topic}」`);
@@ -276,6 +407,139 @@ function checkContributes(manifest, where) {
     for (const key of ["id", "name"]) {
       if (typeof channel[key] !== "string" || !channel[key]) {
         fail(where, `notificationChannel 缺少 ${key}`);
+      }
+    }
+  }
+
+  const dayMarks = contributes.dayMarks;
+  if (dayMarks) {
+    const providers = dayMarks.providers;
+    if (!Array.isArray(providers) || providers.length === 0) {
+      fail(where, "contributes.dayMarks 需要非空的 providers");
+    } else {
+      const seen = new Set();
+      for (const provider of providers) {
+        if (!provider || typeof provider !== "object") {
+          fail(where, "dayMarks.providers 的每一项必须是对象");
+          continue;
+        }
+        for (const key of ["id", "name"]) {
+          if (typeof provider[key] !== "string" || !provider[key]) {
+            fail(where, `dayMarks.providers 里有一项缺少 ${key}`);
+          }
+        }
+        // provider id 在插件内必须唯一：宿主对外用 `<pluginId>/<providerId>`，
+        // 撞了之后两个 provider 的标记会互相覆盖，而且不报错
+        if (typeof provider.id === "string" && provider.id) {
+          if (seen.has(provider.id)) {
+            fail(where, `dayMarks.providers 里 id「${provider.id}」重复`);
+          }
+          seen.add(provider.id);
+        }
+        const kinds = provider.kinds;
+        if (!Array.isArray(kinds) || kinds.length === 0) {
+          fail(
+            where,
+            `dayMarks.providers「${provider.id ?? "?"}」需要非空的 kinds`,
+          );
+        } else {
+          for (const kind of kinds) {
+            if (!DAY_MARK_KINDS.has(kind)) {
+              fail(
+                where,
+                `未知的 dayMark kind「${kind}」，合法取值：${[...DAY_MARK_KINDS].join(" / ")}`,
+              );
+            }
+          }
+        }
+        if (
+          provider.coversUntil !== undefined &&
+          !/^\d{4}-\d{2}-\d{2}$/.test(String(provider.coversUntil))
+        ) {
+          fail(
+            where,
+            `dayMarks.providers「${provider.id ?? "?"}」的 coversUntil 必须是 YYYY-MM-DD`,
+          );
+        }
+        if (
+          provider.region !== undefined &&
+          !/^[A-Z]{2}$/.test(String(provider.region))
+        ) {
+          warn(
+            where,
+            `dayMarks.providers「${provider.id ?? "?"}」的 region 应该是 ISO 3166-1 alpha-2（如 CN / JP）`,
+          );
+        }
+      }
+    }
+  }
+
+  const overlay = contributes.calendarOverlay;
+  if (overlay) {
+    const providers = overlay.providers;
+    if (!Array.isArray(providers) || providers.length === 0) {
+      fail(where, "contributes.calendarOverlay 需要非空的 providers");
+    } else {
+      const seen = new Set();
+      for (const provider of providers) {
+        if (!provider || typeof provider !== "object") {
+          fail(where, "calendarOverlay.providers 的每一项必须是对象");
+          continue;
+        }
+        for (const key of ["id", "name"]) {
+          if (typeof provider[key] !== "string" || !provider[key].trim()) {
+            fail(where, `calendarOverlay.providers 里有一项缺少 ${key}`);
+          }
+        }
+        // 理由同 dayMarks，而这里更要紧：provider id 是**启用开关**的身份，
+        // 而那个开关是授权闸门——认错人等于把 A 的授权给了 B
+        if (typeof provider.id === "string" && provider.id.trim()) {
+          if (seen.has(provider.id)) {
+            fail(
+              where,
+              `calendarOverlay.providers 里 id「${provider.id}」重复`,
+            );
+          }
+          seen.add(provider.id);
+        }
+        const surfaces = provider.surfaces;
+        if (!Array.isArray(surfaces) || surfaces.length === 0) {
+          fail(
+            where,
+            `calendarOverlay.providers「${provider.id ?? "?"}」需要非空的 surfaces`,
+          );
+        } else {
+          for (const surface of surfaces) {
+            if (!OVERLAY_SURFACES.has(surface)) {
+              fail(
+                where,
+                `未知的 calendarOverlay surface「${surface}」，合法取值：${[...OVERLAY_SURFACES].join(" / ")}`,
+              );
+            }
+          }
+        }
+        // description 是用户决定要不要授权的唯一依据：这个扩展点默认关闭，
+        // 用户在侧栏看到的就是「名字 + 这一句」。只写「飞书考勤」说不清会显示
+        // 什么、数据从哪来，而他要据此把外部账号的个人数据交出来
+        if (
+          provider.description === undefined ||
+          !String(provider.description).trim()
+        ) {
+          warn(
+            where,
+            `calendarOverlay.providers「${provider.id ?? "?"}」建议给 description——` +
+              "它是用户决定要不要授权的唯一依据，要写清会显示什么、数据从哪来",
+          );
+        }
+        // 宿主一律按偏好盖写启用态，manifest 自称无效。声明了只会让作者以为
+        // 装上就生效，然后去查为什么没有数据
+        if (provider.enabled !== undefined) {
+          warn(
+            where,
+            `calendarOverlay.providers「${provider.id ?? "?"}」不要声明 enabled——` +
+              "启用态由宿主按用户偏好盖写，默认关闭",
+          );
+        }
       }
     }
   }
@@ -298,7 +562,9 @@ function collectRegisteredMethods() {
   if (!existsSync(entry)) return null;
   const source = readFileSync(entry, "utf8");
   const methods = new Set();
-  for (const match of source.matchAll(/"([a-zA-Z][a-zA-Z0-9_.]*)":\s*[a-zA-Z_$]/g)) {
+  for (const match of source.matchAll(
+    /"([a-zA-Z][a-zA-Z0-9_.]*)":\s*[a-zA-Z_$]/g,
+  )) {
     methods.add(match[1]);
   }
   return methods;
@@ -310,13 +576,18 @@ function checkSchemaFile(relativePath, registered) {
 
   const where = relativePath;
   if (schema.scope !== "plugin" && schema.scope !== "integration") {
-    fail(where, `scope 必须是 plugin 或 integration，实际是「${schema.scope}」`);
+    fail(
+      where,
+      `scope 必须是 plugin 或 integration，实际是「${schema.scope}」`,
+    );
   }
   if (!Array.isArray(schema.fields)) {
     fail(where, "fields 必须是数组");
     return;
   }
-  const expectedScope = relativePath.includes("integration") ? "integration" : "plugin";
+  const expectedScope = relativePath.includes("integration")
+    ? "integration"
+    : "plugin";
   if (schema.scope !== expectedScope) {
     warn(where, `文件名暗示 scope 应该是 ${expectedScope}`);
   }
@@ -374,7 +645,10 @@ function checkField(field, where, registered, siblingKeys, nested) {
 
     case "enum":
     case "multi-enum":
-      if (!Array.isArray(field.options) && typeof field.optionsFrom !== "string") {
+      if (
+        !Array.isArray(field.options) &&
+        typeof field.optionsFrom !== "string"
+      ) {
         fail(where, `${field.type} 字段 ${label} 需要 options 或 optionsFrom`);
       }
       if (typeof field.optionsFrom === "string") {
@@ -407,7 +681,9 @@ function checkCustomMethod(method, where, label, registered) {
     );
     return;
   }
-  const reserved = RESERVED_PREFIXES.find((prefix) => method.startsWith(prefix));
+  const reserved = RESERVED_PREFIXES.find((prefix) =>
+    method.startsWith(prefix),
+  );
   if (reserved) {
     fail(where, `${label} 的 rpc「${method}」用了宿主保留前缀 ${reserved}`);
     return;
@@ -448,6 +724,8 @@ function checkHandlersMatchContributes(manifest, registered) {
   }
   if ((contributes.hooks ?? []).length > 0) required.push("hook.dispatch");
   if (contributes.notificationChannel) required.push("notify.send");
+  if (contributes.dayMarks) required.push("dayMarks.list");
+  if (contributes.calendarOverlay) required.push("calendarOverlay.list");
 
   for (const method of required) {
     if (!registered.has(method)) {
@@ -460,15 +738,30 @@ function checkHandlersMatchContributes(manifest, registered) {
 
   // 反向：注册了却没声明，宿主永远不会调
   if (registered.has("sync.pull") && !contributes.sync) {
-    warn(where, "注册了 sync.pull 但 manifest 没声明 contributes.sync，不会被调用");
+    warn(
+      where,
+      "注册了 sync.pull 但 manifest 没声明 contributes.sync，不会被调用",
+    );
   }
-  if (registered.has("hook.dispatch") && (contributes.hooks ?? []).length === 0) {
+  if (
+    registered.has("hook.dispatch") &&
+    (contributes.hooks ?? []).length === 0
+  ) {
     warn(where, "注册了 hook.dispatch 但没订阅任何 topic，不会被调用");
   }
   if (registered.has("notify.send") && !contributes.notificationChannel) {
+    warn(where, "注册了 notify.send 但没声明 notificationChannel，不会被调用");
+  }
+  if (registered.has("dayMarks.list") && !contributes.dayMarks) {
     warn(
       where,
-      "注册了 notify.send 但没声明 notificationChannel，不会被调用",
+      "注册了 dayMarks.list 但没声明 contributes.dayMarks，不会被调用",
+    );
+  }
+  if (registered.has("calendarOverlay.list") && !contributes.calendarOverlay) {
+    warn(
+      where,
+      "注册了 calendarOverlay.list 但没声明 contributes.calendarOverlay，不会被调用",
     );
   }
 }
@@ -499,7 +792,8 @@ function checkPermissionUsage(manifest) {
       what: "发起网络请求（fetch）",
     },
     {
-      pattern: /\b(?:https?|node:https?)\b.*\.request\s*\(|\brequire\(["']https?["']\)/,
+      pattern:
+        /\b(?:https?|node:https?)\b.*\.request\s*\(|\brequire\(["']https?["']\)/,
       declared: declaredNet,
       key: "net",
       what: "发起网络请求（http/https 模块）",
@@ -529,7 +823,10 @@ function checkPermissionUsage(manifest) {
   }
 
   // 反向：声明了却没用到，等于向用户多要了权限
-  if (declaredNet && !sources.some((file) => /\bfetch\s*\(|\.request\s*\(/.test(file.text))) {
+  if (
+    declaredNet &&
+    !sources.some((file) => /\bfetch\s*\(|\.request\s*\(/.test(file.text))
+  ) {
     warn(where, "声明了 net 权限但源码里没看到网络调用，考虑去掉");
   }
   if (
@@ -563,6 +860,88 @@ function readSourceFiles() {
   return files;
 }
 
+function checkTools(manifest) {
+  if (!manifest?.contributes?.agentTools) return;
+  const entry = manifest.runtime?.entry?.default;
+  if (!entry || !existsSync(join(ROOT, entry))) return;
+  const dataDir = mkdtempSync(join(tmpdir(), "yinian-tools-doctor-"));
+  try {
+    const frames = [
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "plugin.init",
+        params: {
+          protocolVersion: 1,
+          hostVersion: "0.13.0",
+          pluginId: manifest.id,
+          integrationId: null,
+          apiBaseUrl: "",
+          apiToken: "",
+          dataDir,
+          locale: "zh-CN",
+          logLevel: "error",
+          devMode: true,
+          config: {},
+          state: {},
+        },
+      },
+      {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools.list",
+        params: { integrationId: "doctor-instance", config: {} },
+      },
+      { jsonrpc: "2.0", id: 3, method: "plugin.shutdown", params: {} },
+    ];
+    const run = spawnSync(process.execPath, [join(ROOT, entry)], {
+      input: frames.map((f) => JSON.stringify(f)).join("\n") + "\n",
+      encoding: "utf8",
+      timeout: 15000,
+      maxBuffer: 1024 * 1024,
+    });
+    const response = run.stdout
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+      .find((f) => f.id === 2);
+    if (!response?.result?.tools || response.error)
+      throw new Error("tools.list 未返回工具目录");
+    const tools = response.result.tools;
+    if (!Array.isArray(tools) || tools.length > 32)
+      throw new Error("工具目录必须为最多 32 项的数组");
+    const names = new Set();
+    for (const tool of tools) {
+      if (
+        !/^[A-Za-z0-9_]{1,64}$/.test(tool.name) ||
+        names.has(tool.name) ||
+        !tool.title?.trim() ||
+        !tool.description?.trim()
+      )
+        throw new Error("工具名称、说明或重复定义不合法");
+      names.add(tool.name);
+      if (
+        !["read", "write"].includes(tool.effect) ||
+        (tool.effect === "read" && tool.binding)
+      )
+        throw new Error("工具读写声明不合法");
+      if (tool.binding && !["task", "event"].includes(tool.binding))
+        throw new Error("工具绑定类型不合法");
+      if (
+        tool.binding &&
+        manifest.contributes.agentTools.scope !== "integration"
+      )
+        throw new Error("绑定工具需要 integration scope");
+      validateToolSchema(tool.inputSchema);
+      if (tool.outputSchema) validateToolSchema(tool.outputSchema);
+    }
+  } catch (e) {
+    fail("agentTools", e.message);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+}
+
 function main() {
   const manifest = checkManifest();
   const registered = collectRegisteredMethods();
@@ -574,6 +953,7 @@ function main() {
   }
   checkHandlersMatchContributes(manifest, registered);
   checkPermissionUsage(manifest);
+  checkTools(manifest);
 
   for (const message of warnings) console.warn(`[warn] ${message}`);
   for (const message of errors) console.error(`[error] ${message}`);

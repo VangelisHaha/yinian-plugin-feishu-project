@@ -26,7 +26,11 @@ import type {
   PushResult,
 } from "../sdk/index.mjs";
 import { MeegleClient, type MeegleClientOptions } from "../feishu/mcp.mjs";
-import { mapSchedule, type ScheduleNode, type ScheduleResponse } from "../feishu/mapping.mjs";
+import {
+  mapSchedule,
+  type ScheduleNode,
+  type ScheduleResponse,
+} from "../feishu/mapping.mjs";
 
 export interface IntegrationSettings {
   projectKey: string;
@@ -36,15 +40,20 @@ export interface IntegrationSettings {
 }
 
 /** 从合并后的配置里取插件级凭据。 */
-export function credentialsFrom(config: Record<string, unknown>): MeegleClientOptions {
+export function credentialsFrom(
+  config: Record<string, unknown>,
+): MeegleClientOptions {
   return {
     token: String(config.token ?? "").trim(),
-    host: String(config.host ?? "project.feishu.cn").trim() || "project.feishu.cn",
+    host:
+      String(config.host ?? "project.feishu.cn").trim() || "project.feishu.cn",
   };
 }
 
 /** 从合并后的配置里取实例级设置，缺省值与 settings.integration.json 保持一致。 */
-export function integrationSettingsFrom(config: Record<string, unknown>): IntegrationSettings {
+export function integrationSettingsFrom(
+  config: Record<string, unknown>,
+): IntegrationSettings {
   const types = Array.isArray(config.workItemTypes)
     ? config.workItemTypes.map((value) => String(value)).filter(Boolean)
     : [];
@@ -67,9 +76,16 @@ function clampWindow(days: number): number {
  * 从上周一而不是今天起算，是为了让上周没同步过的排期也能补进来；`nikou-screen`
  * 用的也是这个窗口，实践上够用。
  */
-export function scheduleWindow(now: Date, windowDays: number): { from: string; to: string } {
+export function scheduleWindow(
+  now: Date,
+  windowDays: number,
+): { from: string; to: string } {
   const weekday = now.getDay() === 0 ? 7 : now.getDay();
-  const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (weekday - 1));
+  const monday = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate() - (weekday - 1),
+  );
   const start = new Date(monday);
   start.setDate(monday.getDate() - 7);
   const end = new Date(start);
@@ -88,8 +104,9 @@ export function fetchSchedule(
   client: MeegleClient,
   settings: IntegrationSettings,
   now: Date = new Date(),
+  range?: { from: string; to: string },
 ): Promise<ScheduleResponse> {
-  const { from, to } = scheduleWindow(now, settings.windowDays);
+  const { from, to } = range ?? scheduleWindow(now, settings.windowDays);
   return client.callTool<ScheduleResponse>("list_schedule", {
     project_key: settings.projectKey,
     user_keys: ["current_login_user()"],
@@ -119,12 +136,19 @@ export async function pull(request: PullRequest): Promise<PullResult> {
     utcOffset: settings.utcOffset,
   });
 
-  const slots = items.reduce((sum, item) => sum + (item.schedule?.length ?? 0), 0);
-  const unscheduled = response.user_workload_list?.[0]?.total_unscheduled_task ?? 0;
-  logger.info(`拉取完成：${items.length} 个工作项、${slots} 段排期，未排期 ${unscheduled}`, {
-    code: "FEISHU_PROJECT_PULL_DONE",
-    traceId: request.traceId,
-  });
+  const slots = items.reduce(
+    (sum, item) => sum + (item.schedule?.length ?? 0),
+    0,
+  );
+  const unscheduled =
+    response.user_workload_list?.[0]?.total_unscheduled_task ?? 0;
+  logger.info(
+    `拉取完成：${items.length} 个工作项、${slots} 段排期，未排期 ${unscheduled}`,
+    {
+      code: "FEISHU_PROJECT_PULL_DONE",
+      traceId: request.traceId,
+    },
+  );
 
   return {
     items,

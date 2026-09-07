@@ -11,6 +11,8 @@ export {
   log,
   logger,
   progress,
+  replicaChanged,
+  replicaHeartbeat,
   setState,
   start,
   type Handler,
@@ -30,3 +32,5 @@ export {
 } from "./protocol.mjs";
 
 export type * from "./types.mjs";
+
+export * from "./tools.mjs";
