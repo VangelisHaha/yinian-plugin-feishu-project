@@ -1,6 +1,6 @@
 {
   "name": "yinian-plugin-feishu-project",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "一念（Yinian）的飞书项目（Meegle）排期同步插件，走官方 HTTP MCP，零运行时依赖",
   "type": "module",
   "private": true,

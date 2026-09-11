@@ -31,5 +31,6 @@ start({
     "config.validate": config.validate,
     "feishuProject.testConnection": config.testConnection,
     "feishuProject.previewSchedule": config.previewSchedule,
+    "feishuProject.previewBugs": config.previewBugs,
   },
 });

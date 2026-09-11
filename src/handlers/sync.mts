@@ -31,13 +31,39 @@ import {
   type ScheduleNode,
   type ScheduleResponse,
 } from "../feishu/mapping.mjs";
+import {
+  bugRowsOf,
+  buildBugMql,
+  isBugExternalId,
+  mapBugs,
+  type BugMqlResponse,
+  type BugRow,
+  type BugScope,
+  type BugSettings,
+} from "../feishu/bugs.mjs";
+import type { ExternalPriority } from "../sdk/index.mjs";
 
 export interface IntegrationSettings {
   projectKey: string;
   windowDays: number;
   workItemTypes: string[];
   utcOffset: string;
+  bugs: BugSettings;
 }
+
+/** 默认算「待我修」的缺陷状态。是 huasheng 空间实测过的一组，其它空间在设置里改。 */
+const DEFAULT_OPEN_STATUSES = [
+  "新建",
+  "处理中",
+  "重新打开",
+  "延期修复",
+  "产品验收失败重新打开",
+  "提单人确认",
+];
+
+const DEFAULT_ASSIGNEE_ROLE = "问题指派修复者";
+const BUG_SCOPES: BugScope[] = ["assignee", "operator", "creator"];
+const PRIORITIES: ExternalPriority[] = ["none", "low", "medium", "high"];
 
 /** 从合并后的配置里取插件级凭据。 */
 export function credentialsFrom(
@@ -62,7 +88,60 @@ export function integrationSettingsFrom(
     windowDays: clampWindow(Number(config.windowDays ?? 21)),
     workItemTypes: types.length > 0 ? types : ["_all"],
     utcOffset: String(config.utcOffset ?? "+08:00").trim() || "+08:00",
+    bugs: bugSettingsFrom(config),
   };
+}
+
+/**
+ * 缺陷同步设置。缺省值与 `settings.integration.json` 保持一致。
+ *
+ * 老实例的配置里没有这些 key，读到 `undefined` 时要落到「跟新装一样」的默认，
+ * 而不是当成「用户关掉了」——否则升级后缺陷同步会静默不生效。
+ */
+export function bugSettingsFrom(config: Record<string, unknown>): BugSettings {
+  const floor = PRIORITIES.includes(config.bugPriorityFloor as ExternalPriority)
+    ? (config.bugPriorityFloor as ExternalPriority)
+    : "high";
+  return {
+    // 缺省 true：这一版的目的就是把缺陷带进来
+    enabled: config.syncBugs === undefined ? true : Boolean(config.syncBugs),
+    assigneeRole:
+      String(config.bugAssigneeRole ?? "").trim() || DEFAULT_ASSIGNEE_ROLE,
+    // **只有 undefined 才落默认**：用户把勾全清了要如实反映成空数组，让 validate
+    // 报出来。悄悄替他补一个默认口径，等于同步进来一批他没要的东西。
+    scopes:
+      config.bugScopes === undefined
+        ? ["assignee"]
+        : enumList(config.bugScopes, BUG_SCOPES),
+    openStatuses:
+      config.bugOpenStatuses === undefined
+        ? [...DEFAULT_OPEN_STATUSES]
+        : stringList(config.bugOpenStatuses),
+    priorityBasis: config.bugPriorityBasis === "severity" ? "severity" : "priority",
+    priorityFloor: floor,
+    closeLookbackDays: clampInt(config.bugCloseLookbackDays, 14, 1, 90),
+    dueDays: clampInt(config.bugDueDays, 0, 0, 90),
+    // 显式空串表示不打标签，所以只有 undefined 才落默认
+    tag: config.bugTag === undefined ? "缺陷" : String(config.bugTag).trim(),
+    limit: clampInt(config.bugLimit, 200, 10, 500),
+  };
+}
+
+function stringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((entry) => String(entry).trim()).filter(Boolean);
+}
+
+function enumList<T extends string>(value: unknown, allowed: T[]): T[] {
+  return stringList(value).filter((entry): entry is T =>
+    (allowed as string[]).includes(entry),
+  );
+}
+
+function clampInt(value: unknown, fallback: number, min: number, max: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(parsed)));
 }
 
 function clampWindow(days: number): number {
@@ -116,6 +195,31 @@ export function fetchSchedule(
   });
 }
 
+/**
+ * 拉一次缺陷。给 pull 与「预览待修缺陷」共用。
+ *
+ * 关掉时返回空数组而不是抛错，调用方不用到处判开关。
+ */
+export async function fetchBugs(
+  client: MeegleClient,
+  settings: IntegrationSettings,
+  now: Date = new Date(),
+): Promise<BugRow[]> {
+  if (!settings.bugs.enabled) return [];
+  const mql = buildBugMql({
+    projectKey: settings.projectKey,
+    settings: settings.bugs,
+    since: isoDay(
+      new Date(now.getTime() - settings.bugs.closeLookbackDays * 86_400_000),
+    ),
+  });
+  const response = await client.callTool<BugMqlResponse>("search_by_mql", {
+    project_key: settings.projectKey,
+    mql,
+  });
+  return bugRowsOf(response);
+}
+
 export async function pull(request: PullRequest): Promise<PullResult> {
   // 配置从**请求**里取，不是 context()：一个插件进程服务该插件下的所有实例，
   // init 时的那份配置代表不了具体某个实例（契约 §5.1）
@@ -128,11 +232,12 @@ export async function pull(request: PullRequest): Promise<PullResult> {
     );
   }
   const client = new MeegleClient(credentials);
+  const host = credentials.host ?? "project.feishu.cn";
 
   const response = await fetchSchedule(client, settings);
   const items = mapSchedule(response, {
     simpleName: settings.projectKey,
-    host: credentials.host ?? "project.feishu.cn",
+    host,
     utcOffset: settings.utcOffset,
   });
 
@@ -142,8 +247,48 @@ export async function pull(request: PullRequest): Promise<PullResult> {
   );
   const unscheduled =
     response.user_workload_list?.[0]?.total_unscheduled_task ?? 0;
+
+  // 缺陷失败**不吞**：角色名写错、状态勾错这类只能靠报错暴露，静默降级会变成
+  // 「同步成功但缺陷一条没有」，比整轮失败更难查。错误信息带上关掉的办法。
+  let bugItems: ExternalItem[] = [];
+  if (settings.bugs.enabled) {
+    let rows: BugRow[];
+    try {
+      rows = await fetchBugs(client, settings);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `缺陷同步失败：${reason}。检查实例设置里的「指派修复者角色名」与「待我修状态」是否和这个空间一致；也可以先关掉「同步缺陷」让排期照常同步`,
+      );
+    }
+    bugItems = mapBugs(rows, {
+      simpleName: settings.projectKey,
+      host,
+      utcOffset: settings.utcOffset,
+      settings: settings.bugs,
+    });
+
+    // 首次拉取（还没有增量下界）**丢掉已收口的缺陷**。
+    //
+    // 「已关闭回看」那一截是为了给**之前同步过**的缺陷打勾，可插件不知道哪些同步过。
+    // 首轮不过滤的话，回看窗口里所有关掉的缺陷都会凭空变成一批「已完成」任务——
+    // 实测某个空间首轮就有 6 条全是 CLOSED，用户刚启用就看到 6 条自己没做过的完成项。
+    // 第二轮起 `since` 有值，该带的打勾数据照常带。
+    if (!request.since) {
+      const before = bugItems.length;
+      bugItems = bugItems.filter((item) => item.status !== "done");
+      const dropped = before - bugItems.length;
+      if (dropped > 0) {
+        logger.info(`首次拉取，跳过 ${dropped} 条已收口的缺陷`, {
+          code: "FEISHU_PROJECT_BUG_FIRST_PULL_SKIP",
+          traceId: request.traceId,
+        });
+      }
+    }
+  }
+
   logger.info(
-    `拉取完成：${items.length} 个工作项、${slots} 段排期，未排期 ${unscheduled}`,
+    `拉取完成：${items.length} 个工作项、${slots} 段排期，未排期 ${unscheduled}；缺陷 ${bugItems.length} 条`,
     {
       code: "FEISHU_PROJECT_PULL_DONE",
       traceId: request.traceId,
@@ -151,7 +296,7 @@ export async function pull(request: PullRequest): Promise<PullResult> {
   );
 
   return {
-    items,
+    items: [...items, ...bugItems],
     // 飞书这个接口没有游标，窗口就是边界，一轮拉完
     hasMore: false,
     // **不传 deletedExternalIds**：工作项掉出窗口不等于被删除，报上去会让宿主把
@@ -167,6 +312,16 @@ export async function push(request: PushRequest): Promise<PushResult> {
 
   if (request.action !== "complete" && request.action !== "reopen") {
     // 宿主只会发 capabilities.actions 里声明过的动作，走到这里说明声明与实现不一致
+    return { applied: false };
+  }
+
+  // 缺陷是**单向**同步：飞书那边的流转要填根因、编码错误分类这些必填项，还会触发
+  // 提单人确认流程，在一念点一下「完成」远远不够。这里硬拦，不靠上层记得别调。
+  if (isBugExternalId(String(request.externalId))) {
+    logger.info(
+      `缺陷 ${request.externalId} 单向同步，跳过回写：请到飞书项目里流转`,
+      { code: "FEISHU_PROJECT_PUSH_BUG_SKIPPED", traceId: request.traceId },
+    );
     return { applied: false };
   }
 
@@ -227,3 +382,4 @@ export function soleNode(
 }
 
 export type { ScheduleNode };
+export type { BugRow, BugScope, BugSettings };

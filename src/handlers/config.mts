@@ -20,8 +20,14 @@ import type {
   FieldError,
 } from "../sdk/index.mjs";
 import { MCP_CONFIG_URL, MeegleClient, MeegleError } from "../feishu/mcp.mjs";
-import { credentialsFrom, integrationSettingsFrom, fetchSchedule } from "./sync.mjs";
+import {
+  credentialsFrom,
+  integrationSettingsFrom,
+  fetchSchedule,
+  fetchBugs,
+} from "./sync.mjs";
 import { mapSchedule } from "../feishu/mapping.mjs";
+import { mapBugs } from "../feishu/bugs.mjs";
 
 /**
  * `search_user_info` 的返回。
@@ -64,6 +70,27 @@ export async function validate(
       field: "utcOffset",
       message: "时区偏移要写成 +08:00 这种形式",
     });
+  }
+  // 缺陷那条链路完全依赖这两项，空了会拼出查不到东西的 MQL，比报错更难查
+  if (settings.bugs.enabled) {
+    if (!settings.bugs.assigneeRole) {
+      errors.push({
+        field: "bugAssigneeRole",
+        message: "填这个空间里「指派修复者」角色的名字，比如「问题指派修复者」",
+      });
+    }
+    if (settings.bugs.scopes.length === 0) {
+      errors.push({
+        field: "bugScopes",
+        message: "至少勾一个归属口径，否则不知道哪些缺陷算你的",
+      });
+    }
+    if (settings.bugs.openStatuses.length === 0) {
+      errors.push({
+        field: "bugOpenStatuses",
+        message: "至少勾一个「待我修」状态，否则所有缺陷都会被当成已收口",
+      });
+    }
   }
   if (errors.length > 0) return { ok: false, errors };
 
@@ -126,6 +153,57 @@ export async function previewSchedule(params: {
       message: `${items.length} 个工作项、${slots} 段排期：\n${preview}${
         items.length > 5 ? `\n… 还有 ${items.length - 5} 个` : ""
       }`,
+    };
+  } catch (error) {
+    return actionErrorOf(error);
+  }
+}
+
+/**
+ * 「预览待修缺陷」：启用前先确认角色名与状态勾对了。
+ *
+ * 缺陷那条链路依赖两个**空间自定义**的东西——「指派修复者」的角色名、状态的中文
+ * label。填错的表现是 `attribute not found` 或者一条都查不到，先在这里试一次比
+ * 等首次同步报错友好。
+ */
+export async function previewBugs(params: {
+  config?: Record<string, unknown>;
+}): Promise<ActionResult> {
+  const merged = { ...context().config, ...(params.config ?? {}) };
+  const credentials = credentialsFrom(merged);
+  const settings = integrationSettingsFrom(merged);
+  if (!credentials.token) return { message: "请先在插件设置里填 MCP Token" };
+  if (!settings.projectKey) return { message: "请先填空间" };
+  if (!settings.bugs.enabled) {
+    return { message: "「同步缺陷」是关着的，打开后再预览" };
+  }
+
+  try {
+    const rows = await fetchBugs(new MeegleClient(credentials), settings);
+    const items = mapBugs(rows, {
+      simpleName: settings.projectKey,
+      host: credentials.host ?? "project.feishu.cn",
+      utcOffset: settings.utcOffset,
+      settings: settings.bugs,
+    });
+    const open = items.filter((item) => item.status !== "done");
+    const closing = items.length - open.length;
+    if (items.length === 0) {
+      return {
+        message:
+          "没查到缺陷。如果确定名下有未修的，检查「指派修复者角色名」和「待我修状态」是否和这个空间一致",
+      };
+    }
+    const preview = open
+      .slice(0, 5)
+      .map((item) => `· [${item.priority}] ${item.title}`)
+      .join("\n");
+    return {
+      message:
+        `待修 ${open.length} 条` +
+        (closing > 0 ? `（另有 ${closing} 条已收口，首次同步不会带进来）` : "") +
+        `：\n${preview}` +
+        (open.length > 5 ? `\n… 还有 ${open.length - 5} 条` : ""),
     };
   } catch (error) {
     return actionErrorOf(error);

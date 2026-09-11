@@ -44,6 +44,142 @@
       "label": "预览本窗口排期",
       "rpc": "feishuProject.previewSchedule",
       "help": "先看看会同步进来什么，再决定要不要启用"
+    },
+    {
+      "key": "bugNote",
+      "type": "note",
+      "label": "缺陷同步",
+      "text": "缺陷是**状态流**工作项，没有排期节点，所以它**不会在日历时间轴上占一段**，进来就是一条按紧急度排序的待办。**同步是单向的**：飞书那边流转要填根因、编码错误分类这些必填项，在一念点「完成」不会推回去。"
+    },
+    {
+      "key": "syncBugs",
+      "type": "boolean",
+      "label": "同步缺陷",
+      "default": true,
+      "help": "把指派给你的缺陷当任务带进来"
+    },
+    {
+      "key": "bugScopes",
+      "type": "multi-enum",
+      "label": "算「我的」缺陷",
+      "visibleWhen": { "field": "syncBugs", "equals": true },
+      "options": [
+        { "value": "assignee", "label": "指派修复者" },
+        { "value": "operator", "label": "当前负责人" },
+        { "value": "creator", "label": "我创建的" }
+      ],
+      "default": ["assignee"],
+      "help": "多选之间是「或」。勾上「我创建的」会把你提的单也带进来，量通常大得多"
+    },
+    {
+      "key": "bugAssigneeRole",
+      "type": "string",
+      "label": "指派修复者角色名",
+      "visibleWhen": { "field": "syncBugs", "equals": true },
+      "default": "问题指派修复者",
+      "placeholder": "问题指派修复者",
+      "help": "这个角色的名字是**空间自定义**的，填错会报「字段不存在」。去空间的缺陷角色配置里照抄"
+    },
+    {
+      "key": "bugOpenStatuses",
+      "type": "multi-enum",
+      "label": "算「待我修」的状态",
+      "visibleWhen": { "field": "syncBugs", "equals": true },
+      "options": [
+        { "value": "新建", "label": "新建" },
+        { "value": "处理中", "label": "处理中" },
+        { "value": "重新打开", "label": "重新打开" },
+        { "value": "延期修复", "label": "延期修复" },
+        { "value": "产品验收失败重新打开", "label": "产品验收失败重新打开" },
+        { "value": "提单人确认", "label": "提单人确认" },
+        { "value": "测试确认", "label": "测试确认" },
+        { "value": "已解决", "label": "已解决" },
+        { "value": "已解决流转至转派开发确认", "label": "已解决流转至转派开发确认" },
+        { "value": "转派至其他开发进行修复", "label": "转派至其他开发进行修复" },
+        { "value": "产品确认需求缺陷", "label": "产品确认需求缺陷" }
+      ],
+      "default": [
+        "新建",
+        "处理中",
+        "重新打开",
+        "延期修复",
+        "产品验收失败重新打开",
+        "提单人确认"
+      ],
+      "help": "不在这里的状态一律视为已收口，会在一念里被打勾。「处理中」映射成进行中，其余映射成待办。状态名也是空间自定义的，不一致时改这里"
+    },
+    {
+      "key": "bugPriorityBasis",
+      "type": "enum",
+      "label": "紧急度依据",
+      "visibleWhen": { "field": "syncBugs", "equals": true },
+      "default": "priority",
+      "options": [
+        { "value": "priority", "label": "优先级（紧急/高/中/低）" },
+        { "value": "severity", "label": "严重程度（致命/严重/一般/轻微/建议）" }
+      ],
+      "help": "优先级：紧急、高→高，中→中，低→低；严重程度：致命、严重→高，一般→中，轻微、建议→低"
+    },
+    {
+      "key": "bugPriorityFloor",
+      "type": "enum",
+      "label": "紧急度下限",
+      "visibleWhen": { "field": "syncBugs", "equals": true },
+      "default": "high",
+      "options": [
+        { "value": "none", "label": "不设下限（完全跟随飞书）" },
+        { "value": "low", "label": "至少低" },
+        { "value": "medium", "label": "至少中" },
+        { "value": "high", "label": "至少高（默认）" }
+      ],
+      "help": "缺陷普遍比普通任务急。默认一律按「高」，想完全跟随飞书就选「不设下限」"
+    },
+    {
+      "key": "bugCloseLookbackDays",
+      "type": "integer",
+      "label": "已关闭回看天数",
+      "visibleWhen": { "field": "syncBugs", "equals": true },
+      "default": 14,
+      "min": 1,
+      "max": 90,
+      "help": "缺陷在飞书关掉后会掉出「待我修」，靠这个窗口把它捞回来映射成已完成，好让一念自己打勾。设太小会留下永远挂着的任务"
+    },
+    {
+      "key": "bugDueDays",
+      "type": "integer",
+      "label": "按创建时间造截止日",
+      "visibleWhen": { "field": "syncBugs", "equals": true },
+      "default": 0,
+      "min": 0,
+      "max": 90,
+      "help": "飞书的缺陷**没有截止时间字段**。填 0 表示不造，缺陷就没有日期；填 N 表示用「创建时间 + N 天」当截止日，好让它在日历上有个 Deadline 标记——这是算出来的，不是飞书里的真实排期"
+    },
+    {
+      "key": "bugTag",
+      "type": "string",
+      "label": "缺陷标签",
+      "visibleWhen": { "field": "syncBugs", "equals": true },
+      "default": "缺陷",
+      "maxLength": 16,
+      "help": "给同步来的缺陷打这个标签，方便和需求分开筛。留空则不打"
+    },
+    {
+      "key": "bugLimit",
+      "type": "integer",
+      "label": "单次拉取上限",
+      "visibleWhen": { "field": "syncBugs", "equals": true },
+      "default": 200,
+      "min": 10,
+      "max": 500,
+      "help": "超出的部分这一轮不会带进来"
+    },
+    {
+      "key": "previewBugs",
+      "type": "action",
+      "label": "预览待修缺陷",
+      "visibleWhen": { "field": "syncBugs", "equals": true },
+      "rpc": "feishuProject.previewBugs",
+      "help": "角色名和状态名都是空间自定义的，启用前先在这里试一次"
     }
   ]
 }
