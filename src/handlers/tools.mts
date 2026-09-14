@@ -18,7 +18,7 @@ export const tools: ToolDefinition[] = [
     name: "list_schedule",
     title: "查看飞书项目最新排期",
     description:
-      "实时读取当前用户的飞书项目排期、工作项和节点细节。from/to 为日期范围（最多 90 天），keyword 可按标题或节点过滤。无日期使用实例默认窗口；不会导入或修改一念。",
+      "实时读取当前用户的飞书项目排期、工作项和节点细节。from/to 为日期范围（最多 90 天），keyword 可按标题或节点过滤。无日期使用实例默认窗口；不会导入或修改安时。",
     effect: "read",
     inputSchema: {
       type: "object",
@@ -73,7 +73,7 @@ export const tools: ToolDefinition[] = [
     name: "list_bugs",
     title: "查看飞书项目待修缺陷",
     description:
-      "实时读取当前用户在飞书项目里名下的缺陷（含最近关闭的），带状态、优先级与严重程度。keyword 可按标题过滤，openOnly 默认只看待修的。不会导入或修改一念，也不会在飞书里流转任何缺陷。",
+      "实时读取当前用户在飞书项目里名下的缺陷（含最近关闭的），带状态、优先级与严重程度。keyword 可按标题过滤，openOnly 默认只看待修的。不会导入或修改安时，也不会在飞书里流转任何缺陷。",
     effect: "read",
     inputSchema: {
       type: "object",

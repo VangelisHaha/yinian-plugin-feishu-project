@@ -1,5 +1,5 @@
 /**
- * 缺陷（`issue`）→ 一念的 `ExternalItem[]`。**单向，只拉不推。**
+ * 缺陷（`issue`）→ 安时的 `ExternalItem[]`。**单向，只拉不推。**
  *
  * ## 为什么缺陷不能复用排期那条链路
  *
@@ -9,11 +9,11 @@
  *
  * 「不带」是有意的：契约里 `schedule` 缺省表示「这次不带排期信息」，宿主不动任何块；
  * 传 `[]` 会被理解成「外部明确没有排期了」，宿主会去清块。缺陷本来就没有块，传 `[]`
- * 只是白跑一趟清理逻辑，还会误伤用户自己在一念里给这条缺陷加的手工块。
+ * 只是白跑一趟清理逻辑，还会误伤用户自己在安时里给这条缺陷加的手工块。
  *
  * ## 缺陷的 `work_item_status` 是可以用的
  *
- * 仓库 AGENTS.md 里有一条「不要用 `work_item_status` 映射一念的任务状态」——**那条只
+ * 仓库 AGENTS.md 里有一条「不要用 `work_item_status` 映射安时的任务状态」——**那条只
  * 针对需求（`story`）**：需求的状态流 key 是空间自定义的随机串（实测 `zmkpy9tok`），
  * 跨空间没有统一含义。缺陷不一样，实测 huasheng 空间返回的是
  * `OPEN` / `IN PROGRESS` / `RESOLVED` / `REOPENED` / `CLOSED` 这类有语义的 key，加上
@@ -23,11 +23,11 @@
  * ## 已修完的怎么收尾
  *
  * 只拉未关闭的缺陷会留下一个坑：飞书那边关掉后，缺陷掉出结果集，而插件按约定
- * **不上报 `deletedExternalIds`**，于是一念里这条任务永远挂着。所以查询条件是
+ * **不上报 `deletedExternalIds`**，于是安时里这条任务永远挂着。所以查询条件是
  *
  *   （未关闭状态，不限时间） OR （最近 N 天有更新）
  *
- * 后半截把刚关掉的缺陷也捞回来，映射成 `done`，让一念自己打勾。一条 MQL 就够，
+ * 后半截把刚关掉的缺陷也捞回来，映射成 `done`，让安时自己打勾。一条 MQL 就够，
  * 不需要为「已关闭」再跑第二次，也不必枚举空间里所有的关闭态（自定义状态随时会加）。
  */
 
@@ -57,7 +57,7 @@ export interface BugSettings {
   priorityBasis: "priority" | "severity";
   /** 折算结果的下限，缺陷普遍比普通任务急，默认抬到 high。 */
   priorityFloor: ExternalPriority;
-  /** 往回看多少天的已关闭缺陷，用来给一念侧打勾。 */
+  /** 往回看多少天的已关闭缺陷，用来给安时侧打勾。 */
   closeLookbackDays: number;
   /** >0 时用「创建时间 + N 天」造一个 dueAt，让缺陷在日历上有 Deadline 标记。 */
   dueDays: number;
@@ -100,10 +100,10 @@ export interface BugRow {
 }
 
 /**
- * 飞书优先级 → 一念四档。
+ * 飞书优先级 → 安时四档。
  *
- * 一念没有「紧急」这一档（只有 none/low/medium/high），所以「紧急」和「高」都落到
- * `high`，真正的紧急度差别靠 `priorityFloor` 与用户自己在一念里的排序解决。
+ * 安时没有「紧急」这一档（只有 none/low/medium/high），所以「紧急」和「高」都落到
+ * `high`，真正的紧急度差别靠 `priorityFloor` 与用户自己在安时里的排序解决。
  */
 const PRIORITY_MAP: Record<string, ExternalPriority> = {
   紧急: "high",
@@ -112,7 +112,7 @@ const PRIORITY_MAP: Record<string, ExternalPriority> = {
   低: "low",
 };
 
-/** 飞书严重程度 → 一念四档。 */
+/** 飞书严重程度 → 安时四档。 */
 const SEVERITY_MAP: Record<string, ExternalPriority> = {
   致命: "high",
   严重: "high",
@@ -275,7 +275,7 @@ export function bugPriority(row: BugRow, settings: BugSettings): ExternalPriorit
   return maxPriority(mapped, settings.priorityFloor);
 }
 
-/** 由状态 label 折出一念三态。不在「待我修」集合里的一律 `done`。 */
+/** 由状态 label 折出安时三态。不在「待我修」集合里的一律 `done`。 */
 export function bugStatus(row: BugRow, settings: BugSettings): ExternalStatus {
   if (!settings.openStatuses.includes(row.statusLabel)) return "done";
   return DOING_STATUSES.has(row.statusLabel) ? "doing" : "todo";

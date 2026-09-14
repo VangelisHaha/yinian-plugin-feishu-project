@@ -1,5 +1,5 @@
 /**
- * `list_schedule` 的响应 → 一念的 `ExternalItem[]`。
+ * `list_schedule` 的响应 → 安时的 `ExternalItem[]`。
  *
  * ## 形状对不上的地方
  *
@@ -13,7 +13,7 @@
  * [7048219224] 招商银行银证接口改造 · 中台开发  8/24~10/10  27d
  * ```
  *
- * 一念是「一个 Task 挂多个排期块」，所以这里**按 work_item_id 聚合**：
+ * 安时是「一个 Task 挂多个排期块」，所以这里**按 work_item_id 聚合**：
  * 一个工作项一条 `ExternalItem`，每个节点（或子任务）一个 `schedule` 段。
  *
  * 反过来做（每个节点各成一个 Task）会让任务列表被同一个需求的各阶段刷屏——
@@ -82,7 +82,7 @@ const MINUTES_PER_DAY = 8 * 60;
 /**
  * 把飞书的 `"2026-08-14 00:00:00"` 转成 RFC3339。
  *
- * 飞书给的是**空间时区的本地时间**且不带偏移。一念要 RFC3339，所以必须补上
+ * 飞书给的是**空间时区的本地时间**且不带偏移。安时要 RFC3339，所以必须补上
  * 时区——按插件配置的 `utcOffset`（默认 +08:00）拼。
  * 直接当 UTC 会让整段排期偏 8 小时，跨天节点的首尾日期都会错。
  */
@@ -135,7 +135,7 @@ export interface MapOptions {
  *
  * 丢弃规则：**没有有效起止时间的节点直接跳过**。它们在飞书里就是「未排期」，
  * 硬塞一个块进去只会在日历上凭空多出一段。整个工作项一个有效节点都没有时，
- * 这个工作项也不产出——没有排期的工作项进一念只是噪音（用户明确要求不带未排期的）。
+ * 这个工作项也不产出——没有排期的工作项进安时只是噪音（用户明确要求不带未排期的）。
  */
 export function mapSchedule(response: ScheduleResponse, options: MapOptions): ExternalItem[] {
   const byWorkItem = new Map<string, ExternalItem>();
@@ -197,7 +197,7 @@ export function mapSchedule(response: ScheduleResponse, options: MapOptions): Ex
 /**
  * 「来源」区块要展示的字段。
  *
- * 一念主模型只收所有待办系统都有的字段，飞书项目独有的东西（空间、当前走到哪个节点、
+ * 安时主模型只收所有待办系统都有的字段，飞书项目独有的东西（空间、当前走到哪个节点、
  * 排期给了谁）只能走 `details`。值必须是**已经格式化好的文本**——宿主不认识飞书的
  * 数据结构，原样展示而已。
  *
@@ -283,7 +283,7 @@ function slotsOf(node: ScheduleNode, utcOffset: string): ExternalScheduleSlot[] 
  * 全部段都完成 → `done`；有段在进行 → `doing`；否则 `todo`。
  *
  * 刻意**不用** `work_item_status`：它是空间自定义的状态流 key（实测是
- * `zmkpy9tok` 这种随机串），跨空间没有统一含义，映射不到一念的三态。
+ * `zmkpy9tok` 这种随机串），跨空间没有统一含义，映射不到安时的三态。
  * 节点流转标记是通用的。
  */
 export function rollupStatus(slots: ExternalScheduleSlot[]): ExternalStatus {

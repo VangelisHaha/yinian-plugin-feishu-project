@@ -2,7 +2,7 @@
 /**
  * 模拟宿主。零依赖，只用 Node 标准库。
  *
- * 按真实宿主的方式起插件子进程并走一遍完整生命周期，让你**不装一念也能开发**：
+ * 按真实宿主的方式起插件子进程并走一遍完整生命周期，让你**不装安时也能开发**：
  *
  *   plugin.init → config.validate → sync.pull → sync.push
  *   → hook.dispatch（含一次重复投递，验证幂等）→ notify.send → plugin.shutdown

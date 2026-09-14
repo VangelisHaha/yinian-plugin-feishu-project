@@ -1,4 +1,4 @@
-/** 通用 AI 工具注册器。契约见一念插件文档 §15；纯工具插件也可使用。 */
+/** 通用 AI 工具注册器。契约见安时插件文档 §15；纯工具插件也可使用。 */
 import type { Handler } from "./runtime.mjs";
 import type {
   ExternalItem,

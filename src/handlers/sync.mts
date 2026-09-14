@@ -9,7 +9,7 @@
  * ## 回写
  *
  * 只回写**完成状态**，不回写排期。排期以飞书为权威（`docs/11` §5.1）：用户在飞书
- * 调排期，一念这边跟着变；反过来推会让两边各改一半，merge 出来的结果和两边都不一致。
+ * 调排期，安时这边跟着变；反过来推会让两边各改一半，merge 出来的结果和两边都不一致。
  *
  * 完成状态的回写有个限制：飞书项目的「完成」是**节点/子任务级**的流转，不是工作项
  * 级的开关。一个工作项挂四个节点时，「这个任务完成了」对应哪个节点并不确定。所以
@@ -316,7 +316,7 @@ export async function push(request: PushRequest): Promise<PushResult> {
   }
 
   // 缺陷是**单向**同步：飞书那边的流转要填根因、编码错误分类这些必填项，还会触发
-  // 提单人确认流程，在一念点一下「完成」远远不够。这里硬拦，不靠上层记得别调。
+  // 提单人确认流程，在安时点一下「完成」远远不够。这里硬拦，不靠上层记得别调。
   if (isBugExternalId(String(request.externalId))) {
     logger.info(
       `缺陷 ${request.externalId} 单向同步，跳过回写：请到飞书项目里流转`,
@@ -351,7 +351,7 @@ export async function push(request: PushRequest): Promise<PushResult> {
       work_item_id: String(request.externalId),
       node_id: target.stateId,
       action: finished ? "confirm" : "rollback",
-      ...(finished ? {} : { rollback_reason: "在一念里重新打开" }),
+      ...(finished ? {} : { rollback_reason: "在安时里重新打开" }),
     });
   }
 
