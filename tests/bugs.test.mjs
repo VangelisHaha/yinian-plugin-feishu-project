@@ -21,6 +21,8 @@ import {
   bugRowsOf,
   bugStatus,
   bugUrl,
+  bugWorkItemId,
+  buildBugExistsMql,
   buildBugMql,
   flattenRow,
   isBugExternalId,
@@ -291,6 +293,51 @@ describe("映射成 ExternalItem", () => {
   it("没有标题时用工作项 id 兜底", () => {
     const [item] = mapBugs([{ workItemId: "9", name: "", statusLabel: "新建" }], OPTIONS);
     assert.equal(item.title, "缺陷 #9");
+  });
+
+  it("已收口的缺陷标 updateOnly，待修的不标", () => {
+    const [closed] = mapBugs([{ workItemId: "9", name: "关掉了", statusLabel: "关闭" }], OPTIONS);
+    const [open] = mapBugs([{ workItemId: "10", name: "还在修", statusLabel: "处理中" }], OPTIONS);
+    assert.equal(closed.status, "done");
+    // 回看窗口捞回来的已关闭缺陷不能凭空变成一条「已完成」任务
+    assert.equal(closed.updateOnly, true);
+    assert.equal(open.updateOnly, undefined, "待修的缺陷该照常导入");
+  });
+
+  it("核实结果一律 updateOnly，哪怕状态还是待修", () => {
+    const [item] = mapBugs([{ workItemId: "9", name: "改派给别人了", statusLabel: "处理中" }], {
+      ...OPTIONS,
+      forceUpdateOnly: true,
+    });
+    assert.equal(item.status, "doing");
+    assert.equal(item.updateOnly, true);
+  });
+});
+
+describe("已删除缺陷的核实", () => {
+  it("按 id 查存在性的语句不带任何归属条件", () => {
+    const mql = buildBugExistsMql("huasheng", ["7115434504", "7115386521"]);
+    assert.ok(mql.includes("`work_item_id` IN (7115434504, 7115386521)"));
+    assert.ok(mql.includes("FROM `huasheng`.`缺陷`"));
+    // 带上归属的话，一条被改派给别人的缺陷会查不到、被判成已删除，而宿主会真删本地任务
+    assert.ok(!mql.includes("current_login_user"));
+    // 也不能按状态过滤：核实要回答「还存在吗」，不是「还没关吗」
+    assert.ok(!mql.includes("`work_item_status` IN"));
+    // 字段列表要和常规查询一致，否则核实回来的行映射不出状态
+    assert.ok(mql.includes("`work_item_status`"));
+  });
+
+  it("一个 id 都没有时报错，而不是拼出 IN () 这种语句", () => {
+    assert.throws(() => buildBugExistsMql("huasheng", []), /至少要给一个/);
+    assert.throws(() => buildBugExistsMql("huasheng", ["  "]), /至少要给一个/);
+  });
+
+  it("externalId 反解只接受纯数字，别的一律不当缺陷", () => {
+    assert.equal(bugWorkItemId("bug:7115434504"), "7115434504");
+    assert.equal(bugWorkItemId("7115434504"), null, "没有前缀的是排期工作项");
+    // 这串东西会直接拼进 MQL 的 IN 列表，非数字必须挡在外面
+    assert.equal(bugWorkItemId("bug:1 OR 1=1"), null);
+    assert.equal(bugWorkItemId("bug:"), null);
   });
 });
 

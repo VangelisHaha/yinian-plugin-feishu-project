@@ -22,13 +22,28 @@
  *
  * ## 已修完的怎么收尾
  *
- * 只拉未关闭的缺陷会留下一个坑：飞书那边关掉后，缺陷掉出结果集，而插件按约定
- * **不上报 `deletedExternalIds`**，于是安时里这条任务永远挂着。所以查询条件是
+ * 只拉未关闭的缺陷会留下一个坑：飞书那边关掉后，缺陷掉出结果集，于是安时里这条任务
+ * 永远挂着。所以查询条件是
  *
  *   （未关闭状态，不限时间） OR （最近 N 天有更新）
  *
  * 后半截把刚关掉的缺陷也捞回来，映射成 `done`，让安时自己打勾。一条 MQL 就够，
  * 不需要为「已关闭」再跑第二次，也不必枚举空间里所有的关闭态（自定义状态随时会加）。
+ *
+ * 回看那一截会带出**从来没同步进安时的**已关闭缺陷，所以 `done` 的条目一律打
+ * `updateOnly`：宿主查不到关联就丢掉。**别再改回「靠 `request.since` 判首轮、整批
+ * 丢掉 done」那套**——宿主曾经一直传 `since: null`，于是每轮都被当成首轮，已解决的
+ * 缺陷永远打不上勾，而日志、报表、错误码一切正常，只是少了一类数据。
+ *
+ * ## 已删除的怎么收尾
+ *
+ * 宿主每轮会带 `staleExternalIds`（「我这边有这些关联，你上轮没提到，还在吗」）。
+ * 拿这批 id 跑一条**不带归属条件**的 `work_item_id IN (…)` 核实：查得到的照常映射
+ * （顺带给早就关掉的老缺陷打勾），查不到的才报进 `deletedExternalIds`。
+ *
+ * 查询里混一个**已知存在**的 id 当哨兵：哨兵也查不到就说明这次核实本身不可信
+ * （鉴权、接口、空间权限出了问题），整批放弃上报。没有哨兵的话，一次权限失效会让
+ * 插件把所有缺陷任务都报成已删除，而 manifest 里声明的是 `remoteDelete: "delete"`。
  */
 
 import type {
@@ -210,6 +225,11 @@ export interface BugQueryOptions {
   since: string;
 }
 
+/** 两条查询共用的字段列表：常规拉取与「这些还在吗」的核实必须映射出同样的形状。 */
+const BUG_SELECT =
+  "SELECT `work_item_id`, `name`, `priority`, `severity`, `work_item_status`, " +
+  "`start_time`, `updated_at` ";
+
 /**
  * 拼查询语句。
  *
@@ -230,12 +250,34 @@ export function buildBugMql(options: BugQueryOptions): string {
 
   const statuses = settings.openStatuses.map(quote).join(", ");
   return (
-    "SELECT `work_item_id`, `name`, `priority`, `severity`, `work_item_status`, " +
-    "`start_time`, `updated_at` " +
+    BUG_SELECT +
     `FROM \`${projectKey}\`.\`缺陷\` ` +
     `WHERE (${scopes.join(" OR ")}) ` +
     `AND (\`work_item_status\` IN (${statuses}) OR \`updated_at\` >= ${quote(since)}) ` +
     `LIMIT ${settings.limit}`
+  );
+}
+
+/**
+ * 按 id 核实这批缺陷还在不在。
+ *
+ * **刻意不带任何归属条件**：这条语句要回答的是「这个工作项还存在吗」，而不是
+ * 「它还算我的吗」。带上归属的话，一条被改派给别人的缺陷会查不到，于是被判成
+ * 「已删除」——那是最糟的误判方向，因为宿主按声明会把本地任务真删掉。
+ *
+ * 返回的行照常映射，所以顺带修掉一类老账：一条早在回看窗口之外就关掉的缺陷，
+ * 安时里还挂着待办，被问到时就能一起打上勾。
+ */
+export function buildBugExistsMql(projectKey: string, workItemIds: string[]): string {
+  const ids = workItemIds.map((id) => id.trim()).filter(Boolean);
+  if (ids.length === 0) {
+    throw new Error("核实缺陷是否存在至少要给一个工作项 id");
+  }
+  return (
+    BUG_SELECT +
+    `FROM \`${projectKey}\`.\`缺陷\` ` +
+    `WHERE \`work_item_id\` IN (${ids.join(", ")}) ` +
+    `LIMIT ${ids.length}`
   );
 }
 
@@ -260,11 +302,26 @@ export function isBugExternalId(externalId: string): boolean {
   return externalId.startsWith(BUG_ID_PREFIX);
 }
 
+/** `bug:7115434504` → `7115434504`。不是缺陷 id 时返回 `null`。 */
+export function bugWorkItemId(externalId: string): string | null {
+  if (!isBugExternalId(externalId)) return null;
+  const id = externalId.slice(BUG_ID_PREFIX.length).trim();
+  // 只接受纯数字：这串东西会直接拼进 MQL 的 IN 列表
+  return /^\d+$/.test(id) ? id : null;
+}
+
 export interface MapBugOptions {
   simpleName: string;
   host: string;
   utcOffset: string;
   settings: BugSettings;
+  /**
+   * 强制把每一条都标成 `updateOnly`。
+   *
+   * 「这些还在吗」的核实结果走这里：那批 id 本来就是安时里已有的关联，核实的目的是
+   * 收口，不是导入新东西。
+   */
+  forceUpdateOnly?: boolean;
 }
 
 /** 折算一条缺陷的紧急度：先按口径映射，再套下限。 */
@@ -310,20 +367,34 @@ function dayEndAfter(day: string, days: number, utcOffset: string): string | nul
  *   契约明确要求不知道就别传，宿主自己会记录收到 `done` 的时间。
  * - **`estimateMinutes`**：空间里的「缺陷估分(人天)」是自定义字段（`field_e0597b`
  *   这种空间私有 key），跨空间取不到，不做。
+ *
+ * 已收口（`done`）的一律打 `updateOnly`，见函数体里的注释。
  */
 export function mapBugs(rows: BugRow[], options: MapBugOptions): ExternalItem[] {
   const { settings } = options;
   const items: ExternalItem[] = [];
   for (const row of rows) {
+    const status = bugStatus(row, settings);
     const item: ExternalItem = {
       externalId: `${BUG_ID_PREFIX}${row.workItemId}`,
       externalUrl: bugUrl(options.host, options.simpleName, row.workItemId),
       title: row.name || `缺陷 #${row.workItemId}`,
-      status: bugStatus(row, settings),
+      status,
       priority: bugPriority(row, settings),
       details: bugDetails(row, options),
       remoteData: { kind: "bug", workItemId: row.workItemId, row },
     };
+
+    // 已收口的缺陷**只用来给安时里已有的任务打勾，不新建**。
+    //
+    // 回看那一截（`updated_at >= since`）会把最近关掉的缺陷一起捞回来，其中大部分
+    // 从来没同步进安时——不加这个标记，用户会凭空多出一批「已完成」任务（实测某个
+    // 空间一次就是 12 条 09-14 批量关掉的）。
+    //
+    // 这里**不要**再改回「靠 `request.since` 判首轮然后整批丢掉」那套：宿主曾经一直
+    // 传 `since: null`，于是每轮都被当成首轮，已解决的缺陷永远打不上勾，而日志上
+    // 一切正常。判「本地有没有这条」是宿主的账，交给它判。
+    if (status === "done" || options.forceUpdateOnly) item.updateOnly = true;
 
     const remoteUpdatedAt = dayStart(row.updatedAt, options.utcOffset);
     if (remoteUpdatedAt) item.remoteUpdatedAt = remoteUpdatedAt;

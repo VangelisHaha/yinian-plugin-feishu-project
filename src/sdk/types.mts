@@ -90,6 +90,18 @@ export interface ExternalItem {
    * 传 `[]` 表示「明确没有了」，宿主会清空。
    */
   details?: ExternalDetailField[];
+  /**
+   * 「这条**只用来更新已经同步过的任务，不要新建**」。缺省 `false`。
+   *
+   * 给「回看一段时间、把已收口的条目捞回来打勾」用：外部系统里一条任务被关掉之后
+   * 通常就掉出了常规查询条件（「查我没做完的」），安时这边永远打不上勾。于是查询要
+   * 多回看几天——可这样会带出**从来没同步进安时的**已关闭条目，它们会凭空变成一批
+   * 「已完成」任务。
+   *
+   * 插件判不了哪些条目在安时里有对应任务（那份账在宿主手上），所以已收口的条目照常
+   * 交上来、打上这个标记：宿主查不到关联就丢掉，查到了就照常更新状态。
+   */
+  updateOnly?: boolean;
 }
 
 /**
@@ -149,10 +161,20 @@ export interface PullRequest {
   traceId: string;
   resource: SyncResource;
   cursor?: string;
-  /** RFC3339，增量下界。 */
+  /** RFC3339，增量下界。宿主传上一次同步成功的时间，首轮为空。 */
   since?: string;
   /** 忽略游标做全量拉取。 */
   full: boolean;
+  /**
+   * 宿主在问：「**我这边有这些关联，上一轮你没提到过它们，还在吗？**」
+   *
+   * 可以按 id 去外部系统核实，确认不存在的放进 `PullResult.deletedExternalIds` 回来。
+   *
+   * **不核实就别回答**。不填 `deletedExternalIds` 是安全的，宿主什么都不做；而
+   * 「这条掉出了我的查询窗口」**不是**删除的证据——窗口滚动、条目被改派给别人都会
+   * 让它消失，它们全都还活着。
+   */
+  staleExternalIds?: string[];
   /**
    * 这个 Integration 的完整配置（插件级 + 实例级，宿主已合并，secret 已解密）。
    *
@@ -191,8 +213,10 @@ export interface PullResult {
   /**
    * 外部已删除的 id。
    *
-   * task：宿主**不会**删本地任务，只把关联标成 `remote_deleted` 等人处理——
-   * 外部删除不该静默带走本地数据。
+   * task：默认宿主**不会**删本地任务，只把关联标成 `remote_deleted` 等人处理——
+   * 外部删除不该静默带走本地数据。插件在 manifest 里声明
+   * `capabilities.remoteDelete = "delete"` 时改成删掉本地任务，**前提是你按 id 去
+   * 外部系统核实过「确实不存在」**，靠「掉出查询窗口」推断的不配用这个声明。
    * event：关联标 `remote_deleted` 且事件置 `canceled`（不软删，
    * 「这个会取消了」本身是用户要看到的信息）。
    */

@@ -2,11 +2,11 @@
   "manifestVersion": 1,
   "id": "yinian-feishu-project",
   "name": "飞书项目",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "author": "vangelis",
   "description": "把飞书项目（Meegle）的排期与缺陷同步进安时：工作项成任务、每个排期节点成一个排期块，指派给你的缺陷单向同步成待办",
   "homepage": "https://github.com/VangelisHaha/yinian-plugin-feishu-project",
-  "minHostVersion": "0.13.0",
+  "minHostVersion": "0.14.30",
   "runtime": {
     "kind": "process",
     "node": ">=20",
@@ -40,7 +40,8 @@
           "schedule",
           "priority",
           "tags"
-        ]
+        ],
+        "remoteDelete": "delete"
       }
     },
     "syncStrategy": {

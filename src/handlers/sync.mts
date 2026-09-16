@@ -33,9 +33,12 @@ import {
 } from "../feishu/mapping.mjs";
 import {
   bugRowsOf,
+  buildBugExistsMql,
   buildBugMql,
+  bugWorkItemId,
   isBugExternalId,
   mapBugs,
+  BUG_ID_PREFIX,
   type BugMqlResponse,
   type BugRow,
   type BugScope,
@@ -251,6 +254,7 @@ export async function pull(request: PullRequest): Promise<PullResult> {
   // 缺陷失败**不吞**：角色名写错、状态勾错这类只能靠报错暴露，静默降级会变成
   // 「同步成功但缺陷一条没有」，比整轮失败更难查。错误信息带上关掉的办法。
   let bugItems: ExternalItem[] = [];
+  let deletedExternalIds: string[] = [];
   if (settings.bugs.enabled) {
     let rows: BugRow[];
     try {
@@ -268,27 +272,21 @@ export async function pull(request: PullRequest): Promise<PullResult> {
       settings: settings.bugs,
     });
 
-    // 首次拉取（还没有增量下界）**丢掉已收口的缺陷**。
-    //
-    // 「已关闭回看」那一截是为了给**之前同步过**的缺陷打勾，可插件不知道哪些同步过。
-    // 首轮不过滤的话，回看窗口里所有关掉的缺陷都会凭空变成一批「已完成」任务——
-    // 实测某个空间首轮就有 6 条全是 CLOSED，用户刚启用就看到 6 条自己没做过的完成项。
-    // 第二轮起 `since` 有值，该带的打勾数据照常带。
-    if (!request.since) {
-      const before = bugItems.length;
-      bugItems = bugItems.filter((item) => item.status !== "done");
-      const dropped = before - bugItems.length;
-      if (dropped > 0) {
-        logger.info(`首次拉取，跳过 ${dropped} 条已收口的缺陷`, {
-          code: "FEISHU_PROJECT_BUG_FIRST_PULL_SKIP",
-          traceId: request.traceId,
-        });
-      }
-    }
+    // 宿主问「这些我这边有、你这轮没提到的缺陷，还在吗」。核实过才回答。
+    const verified = await verifyStaleBugs({
+      client,
+      settings,
+      host,
+      rows,
+      staleExternalIds: request.staleExternalIds ?? [],
+      traceId: request.traceId,
+    });
+    bugItems = [...bugItems, ...verified.items];
+    deletedExternalIds = verified.deletedExternalIds;
   }
 
   logger.info(
-    `拉取完成：${items.length} 个工作项、${slots} 段排期，未排期 ${unscheduled}；缺陷 ${bugItems.length} 条`,
+    `拉取完成：${items.length} 个工作项、${slots} 段排期，未排期 ${unscheduled}；缺陷 ${bugItems.length} 条，已删除 ${deletedExternalIds.length} 条`,
     {
       code: "FEISHU_PROJECT_PULL_DONE",
       traceId: request.traceId,
@@ -299,9 +297,110 @@ export async function pull(request: PullRequest): Promise<PullResult> {
     items: [...items, ...bugItems],
     // 飞书这个接口没有游标，窗口就是边界，一轮拉完
     hasMore: false,
-    // **不传 deletedExternalIds**：工作项掉出窗口不等于被删除，报上去会让宿主把
-    // 关联标成 remote_deleted，用户以为飞书那边删了东西。
-    deletedExternalIds: [],
+    // 只有**按 id 核实过确实不存在**的缺陷才在这里。排期工作项一条都不报：
+    // 它掉出窗口不等于被删除，而 manifest 声明的是 remoteDelete=delete，报错了
+    // 用户的任务会真没了。
+    deletedExternalIds,
+  };
+}
+
+/** 一轮最多核实多少条。MQL 的 `IN` 列表不宜过长，剩下的下一轮再问。 */
+const MAX_VERIFY_PER_ROUND = 50;
+
+interface VerifyStaleBugsOptions {
+  client: MeegleClient;
+  settings: IntegrationSettings;
+  host: string;
+  /** 本轮常规查询已经拿到的缺陷，用来排除「其实还在结果里」的 id，并提供哨兵。 */
+  rows: BugRow[];
+  staleExternalIds: string[];
+  traceId: string;
+}
+
+/**
+ * 核实宿主问到的那批缺陷还在不在。
+ *
+ * 返回两部分：`items` 是「还在」的那些（照常映射，全部标 `updateOnly`，顺带给早就
+ * 关掉的老缺陷打勾），`deletedExternalIds` 是核实为不存在的。
+ *
+ * 三条保险，缺一条都可能把用户的任务误删（宿主按 manifest 会真删）：
+ *
+ * 1. 核实语句**不带归属条件**，所以「改派给别人」不会被当成删除。
+ * 2. 混一个**已知存在**的 id 当哨兵，哨兵查不到就整批放弃——一次鉴权失效会让所有
+ *    缺陷都「查不到」。
+ * 3. 核实失败（报错）时**不上报任何删除**，也不让整轮同步失败：删除是收尾工作，
+ *    不该拖垮排期与缺陷本身的同步。
+ */
+async function verifyStaleBugs(
+  options: VerifyStaleBugsOptions,
+): Promise<{ items: ExternalItem[]; deletedExternalIds: string[] }> {
+  const { client, settings, host, rows, staleExternalIds, traceId } = options;
+  const empty = { items: [] as ExternalItem[], deletedExternalIds: [] as string[] };
+  const seen = new Set(rows.map((row) => row.workItemId));
+  const candidates = staleExternalIds
+    // 只管缺陷：排期工作项掉出窗口是常态，那条链路不上报删除
+    .map(bugWorkItemId)
+    .filter((id): id is string => id !== null && !seen.has(id))
+    .slice(0, MAX_VERIFY_PER_ROUND);
+  if (candidates.length === 0) return empty;
+
+  // 哨兵：本轮常规查询确实返回过的一条。没有就说明这一轮什么缺陷都没查到，
+  // 无法判断「查不到」是真没了还是查询本身有问题，这轮不做删除判定。
+  const sentinel = rows[0]?.workItemId;
+  if (!sentinel) {
+    logger.info(`本轮没有可用哨兵，跳过 ${candidates.length} 条缺陷的存在性核实`, {
+      code: "FEISHU_PROJECT_BUG_VERIFY_SKIPPED",
+      traceId,
+    });
+    return empty;
+  }
+
+  let alive: BugRow[];
+  try {
+    const response = await client.callTool<BugMqlResponse>("search_by_mql", {
+      project_key: settings.projectKey,
+      mql: buildBugExistsMql(settings.projectKey, [...candidates, sentinel]),
+    });
+    alive = bugRowsOf(response);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    logger.warn(`核实缺陷是否已删除失败，本轮不上报删除：${reason}`, {
+      code: "FEISHU_PROJECT_BUG_VERIFY_FAILED",
+      traceId,
+    });
+    return empty;
+  }
+
+  const aliveIds = new Set(alive.map((row) => row.workItemId));
+  if (!aliveIds.has(sentinel)) {
+    logger.warn(
+      `核实缺陷时连哨兵 ${sentinel} 都查不到，这次核实不可信（鉴权或空间权限？），本轮不上报删除`,
+      { code: "FEISHU_PROJECT_BUG_VERIFY_UNTRUSTED", traceId },
+    );
+    return empty;
+  }
+
+  const deleted = candidates.filter((id) => !aliveIds.has(id));
+  if (deleted.length > 0) {
+    logger.info(`核实到 ${deleted.length} 条缺陷已在飞书项目里删除：${deleted.join("、")}`, {
+      code: "FEISHU_PROJECT_BUG_DELETED",
+      traceId,
+    });
+  }
+
+  return {
+    // 哨兵那条本轮已经映射过了，这里排掉，免得同一个 externalId 出现两次
+    items: mapBugs(
+      alive.filter((row) => row.workItemId !== sentinel),
+      {
+        simpleName: settings.projectKey,
+        host,
+        utcOffset: settings.utcOffset,
+        settings: settings.bugs,
+        forceUpdateOnly: true,
+      },
+    ),
+    deletedExternalIds: deleted.map((id) => `${BUG_ID_PREFIX}${id}`),
   };
 }
 
