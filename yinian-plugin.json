@@ -42,6 +42,13 @@
           "tags"
         ],
         "remoteDelete": "delete"
+      },
+      "defaultReminders": {
+        "reminders": [
+          {
+            "offsetMinutes": -15
+          }
+        ]
       }
     },
     "syncStrategy": {
