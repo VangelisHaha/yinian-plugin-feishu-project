@@ -1,68 +1,13 @@
 # AGENTS.md — yinian-plugin-feishu-project
 
-[安时](https://github.com/VangelisHaha/nikou-agenda)的飞书项目（Meegle）排期同步插件。
+[安时](https://github.com/VangelisHaha/nikou-agenda)飞书项目（Meegle）排期同步插件。
 
-## 必须遵守
-
-- 中文回复，中文写注释与文档。
-- 契约的 source of truth 是安时仓库的 `docs/11-plugin-architecture.md`，**不是本仓库的 SDK**。两者不一致时以文档为准。
-- 改完必须 `npm run verify`（build + doctor + 测试）全绿。
-- `src/sdk/` 是从 [yinian-plugin-template](https://github.com/VangelisHaha/yinian-plugin-template) 同步来的，**不要在这里改**——改了下次同步会被覆盖。有问题去模板仓库改。
-- 不引任何运行时依赖。只用 Node 标准库 + `fetch`。
-
-## 三条不能动的实现约束
-
-1. **鉴权头是 `X-Mcp-Token`**。用 `Authorization: Bearer` 会被当成 OAuth 会话，所有 `tools/call` 都回 `MCPPersonalPreferenceDisabled`，看起来像开关没开，其实是头写错了。
-2. **必须走完 MCP 握手**：`initialize` 拿 `mcp-session-id` → `notifications/initialized` → 之后每个请求带 session id。少了会话，服务端认不出是谁。
-3. **`externalRef` 必须稳定**，只由 `state_id`（+ 子任务 id）构成。**绝不能把时间拼进去**——宿主靠它认出「同一段被改了时间」，含时间的话每次改排期都会变成删旧块建新块，块上记的实际起止时间跟着丢，还会每轮刷一堆出站事件。
-
-## 缺陷（`issue`）那条链路（0.3.0 起）
-
-缺陷和排期是**两条完全独立的链路**，代码在 `src/feishu/bugs.mts`，别往 `mapping.mts` 里塞。
-
-- **缺陷是状态流工作项，没有节点、没有排期**，`list_schedule` 里根本不会出现，所以走 `search_by_mql` 查 `` `缺陷` `` 表。
-- **单向，只拉不推**。`externalId` 带 `bug:` 前缀，`sync.push` 据此**硬拦**——不要改成「靠上层记得别调」。飞书那边流转缺陷要填根因、编码错误分类这些必填项并触发提单人确认流程，在安时点一下「完成」远远不够。
-- **`ExternalItem` 不带 `schedule`**。契约里缺省 = 「这次不带排期信息」，宿主不动任何块；传 `[]` = 「外部明确没有排期了」，宿主会去清块，连用户自己给这条缺陷加的手工块一起误伤。**不要为了「看起来完整」补一个 `[]`。**
-- **不带 `completedAt`**。飞书这边只有天精度的更新时间，按它造一个完成时刻是假数据。
-- **不带 `estimateMinutes`**。空间里的「缺陷估分(人天)」是自定义字段（`field_e0597b` 这种空间私有 key），跨空间取不到。
-- **查询条件是「未关闭状态（不限时间） OR 最近 N 天有更新」**，两截都不能删：前半截保证长期挂着没人动的老 bug 不会因为「更新时间太旧」被过滤掉（那批恰恰最该提醒）；后半截把刚关掉的缺陷捞回来映射成 `done`，让安时自己打勾。
-- **已收口（`done`）的条目一律打 `updateOnly`**，宿主查不到关联就丢掉。回看那一截会带出**从来没同步进安时的**已关闭缺陷，不打这个标记用户会凭空多出一批「已完成」任务（实测一次 12 条）。
-  - **别改回「靠 `request.since` 判首轮、整批丢掉 done」那套。** 那是 0.3.0 的做法，而宿主当时**一直传 `since: null`**（契约里写了这个字段、实现从没填过），于是每轮都被当成首轮，已解决的缺陷永远打不上勾——日志、报表、错误码全是正常的，只是少了一类数据。「本地有没有这条」是宿主的账，交给宿主判。
-- **`deletedExternalIds` 只报核实过的**。宿主每轮带 `staleExternalIds`（「我这边有这些关联、你上轮没提到，还在吗」），拿它跑一条**不带归属条件**的 `work_item_id IN (…)`：查得到的照常映射（顺带给早就关掉的老缺陷打勾），查不到的才报删除。manifest 声明了 `remoteDelete: "delete"`，所以报错一条用户的任务就真没了，三条保险不许拆：
-  1. 核实语句不带归属条件——带上的话「改派给别人」会被当成删除。
-  2. 混一个**已知存在**的 id 当哨兵，哨兵也查不到就整批放弃（一次鉴权失效会让所有 id 都「查不到」）。
-  3. 核实本身报错时不上报删除，也不让整轮同步失败。
-- **排期工作项（`story`）那条链路一条删除都不报。** 它掉出窗口是常态，不是被删。
-- **空间自定义的东西一律做成设置项，不写死**：「指派修复者」的角色名（huasheng 叫「问题指派修复者」）、算「待我修」的状态 label。写死会让换空间的人拿到 `attribute not found`。
-- **缺陷失败不吞**。角色名写错、状态勾错只能靠报错暴露；静默降级会变成「同步成功但缺陷一条没有」，比整轮失败难查得多。错误信息里要带「可以先关掉缺陷同步」的出路。
-
-### 一条例外要记住
-
-下面「不要用 `work_item_status` 映射安时的任务状态」**只针对需求（`story`）**。缺陷的状态是有语义的（实测 `OPEN` / `IN PROGRESS` / `RESOLVED` / `REOPENED` / `CLOSED` + 空间自定义若干），而且这里用的是**中文 label** 且**哪些算「待我修」由用户勾选**，没有硬编码任何空间私有 key。别把 `bugs.mts` 当成违规实现删掉。
-
-## 不要做的事
-
-- **不要按节点名猜完成状态**。节点名是「中台开发 / 技术方案设计评审 / 中台提测」这类，不含完成语义；而「确认上线」这种带「上线」的会被误判成已完成。权威来源是 `state.passed` / `reached`。`nikou-screen` 踩过这个坑并明确废弃了那套实现。
-- **不要用 `work_item_status` 映射安时的任务状态**（**仅指需求 `story`**）。它是空间自定义的状态流 key（实测 `zmkpy9tok` 这种随机串），跨空间没有统一含义。缺陷不受这条约束，见上一节的例外说明。
-- **不要回写排期**。飞书是排期的权威，见 README 的「边界」。
-- **不要回写缺陷**。缺陷是单向的，见上一节。
-- **不要上报没核实过的 `deletedExternalIds`**。工作项掉出拉取窗口不等于被删除。缺陷那条链路可以报，但只报按 id 核实过「确实不存在」的，见上一节的三条保险；排期链路一条都不报。
-- **不要在多节点工作项上回写完成状态**。飞书的完成是节点级流转，猜错节点会在飞书上推错流程。
-
-## 时区
-
-飞书返回的排期时间形如 `2026-08-14 00:00:00`，是**空间时区的本地时间且不带偏移**。必须按实例配置的 `utcOffset` 补上再转 RFC3339，当成 UTC 会让整段排期偏 8 小时、跨天节点的首尾日期都错。
-
-## 发布
-
-1. `yinian-plugin.json` 与 `package.json` 的 `version` 同步改。
-2. `npm run pack:zip`。
-3. Git tag **必须与 manifest 的 `version` 完全一致**，GitHub Release 挂那一个 zip。
-4. 索引仓库 [yinian-plugins](https://github.com/VangelisHaha/yinian-plugins) 里加/留一条。
-
-## AI 工具扩展（0.13.0 契约）
-
-`src/handlers/tools.mts` 通过 SDK `toolHandlers` 注册，定义同时作为发现与执行的唯一来源。
-公共 SDK 从官方模板同步；参数 Schema 使用宿主支持的子集。读工具不得写入，写工具必须依赖
-宿主注入的稳定 operationId；声明 idempotent 必须真正处理超时后核对，不能只靠内存去重。
-绑定工具只返回标准外部数据，关联与本地数据库写入由宿主完成，不新增通用动作绕过确认。
+- 中文回复，中文注释与文档。改完必须 `npm run verify` 全绿。**零运行时依赖**（Node 标准库 + `fetch`）。
+- 契约以安时主仓库《插件架构》文档为准；`src/sdk/` 是模板副本，**不要在这里改**。
+- **鉴权头是 `X-Mcp-Token`**，不是 `Authorization: Bearer`（后者所有 `tools/call` 都回 `MCPPersonalPreferenceDisabled`）。
+- **必须走完 MCP 握手**：`initialize` → `notifications/initialized` → 之后每个请求带 `mcp-session-id`。
+- **`externalRef` 必须稳定**，只由 `state_id`（+ 子任务 id）构成，**绝不拼时间**，否则每次改排期都变成删旧块建新块。
+- 缺陷（`issue`）与排期是两条独立链路，代码在 `src/feishu/bugs.mts`：缺陷**单向只拉不推**、不带 `schedule` / `completedAt` / `estimateMinutes`、已收口一律 `updateOnly`、`deletedExternalIds` 只报按 id 核实过的；排期链路一条删除都不报。
+- 不按节点名猜完成状态（用 `state.passed` / `reached`）；不用 `work_item_status` 映射需求状态；不回写排期与缺陷；不在多节点工作项上回写完成状态。
+- 飞书排期时间是空间时区的本地时间且不带偏移，必须按实例 `utcOffset` 补上再转 RFC3339。
+- 发布：`version` 同步 → `npm run pack:zip` → Git tag 与 manifest `version` 完全一致 → 索引仓库加/留一条。
